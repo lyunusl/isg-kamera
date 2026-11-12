@@ -1,0 +1,60 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+
+# Yerel ortam ve çalışma verisi
+.env
+.env.*
+.dev/
+veri/
+logs/
+motor/deps/
+motor/ayar.json
+
+# Gizli kalması gerekenler: anahtarlar, sertifikalar, lisans dosyaları, AugeLab Studio projeleri
+*.pem
+*.key
+*.pfx
+*.p12
+*.lic
+*.pmod
+
+# Yerel model paketleri ve anahtarlar
+kurulum/sifreli-modeller/
+kurulum/lisansli-modeller/
+kurulum/community-modeller/
+model-cihaz-istegi*.json
+*.dpapi
+
+# Veritabanları ve arşivler
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+
+# Günlük ve geçici dosyalar
+*.log
+*.err
+*.img
+*.ok
+*.sh
+
+# Geliştirme dosyaları
+/egitim/
+/requirements-gelistirme.txt
+datasets/
+runs/
+*.pt
