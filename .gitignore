@@ -58,3 +58,6 @@ model-cihaz-istegi*.json
 datasets/
 runs/
 *.pt
+
+# Yerel sınama sonuçları
+test-sonuclari/

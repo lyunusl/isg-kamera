@@ -5,7 +5,13 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 root = Path(SPECPATH).parent
+# Hazır İSG sahnesi: Studio sahneleri şifreli kaydettiği için bir kez Studio'da kurulup kaydedilir (kurulum/sablon.py).
+# Depoda tutulmaz (.gitignore: *.pmod); exe'ye girer ve panel onu arayüzsüz çalıştırır.
+sahne = root / "kurulum" / "sahne" / "isg-kamera.pmod"
+if not sahne.is_file():
+    raise SystemExit(f"Hazır İSG sahnesi yok: {sahne}. kurulum/sablon.py ile üretip Studio'da Farklı Kaydet ile kaydedin.")
 data = [
+    (str(sahne), "kurulum/sahne"),
     (str(root / "web"), "web"),
     (str(root / "ornekler"), "ornekler"),
     (str(root / "motor" / "isg_motor"), "motor/isg_motor"),
@@ -83,8 +89,6 @@ a = Analysis(
     datas=data,
     hiddenimports=(
         collect_submodules("isg_motor")
-        + collect_submodules("mcp.client")
-        + collect_submodules("mcp.shared")
     ),
     excludes=["torch", "tensorflow", "matplotlib", "pytest"],
 )

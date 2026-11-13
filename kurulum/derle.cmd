@@ -22,6 +22,17 @@ if /i "%KIP%"=="community" if not exist kurulum\community-modeller\community-pak
   goto :hata
 )
 
+rem Gelistirme sinamalari yalnizca egitim\ klasoru olan kopyada calisir (GitHub'daki kopyada yoktur).
+for %%S in (dene_kurulum dene_motor_yerlesimi dene_arayuzsuz dene_model_lisansi) do (
+  if exist egitim\%%S.py (
+    .venv\Scripts\python egitim\%%S.py >nul 2>&1 || (echo %%S basarisiz & goto :hata)
+  )
+)
+if not exist kurulum\sahne\isg-kamera.pmod (
+  echo Hazir ISG sahnesi yok: kurulum\sahne\isg-kamera.pmod
+  echo README'deki adimlarla bir kez uretin: kurulum\sablon.py, sonra Studio'da Farkli Kaydet.
+  goto :hata
+)
 .venv\Scripts\python kurulum\simge.py >nul || goto :hata
 
 if /i "%KIP%"=="duz" (
