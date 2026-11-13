@@ -35,8 +35,10 @@ import depo
 
 TURLER = {
     "webhook": "Webhook (JSON)", "slack": "Slack", "teams": "Microsoft Teams", "mqtt": "MQTT", "modbus": "Modbus TCP (PLC)",
-    "opcua": "OPC UA (PLC / SCADA)", "s7": "Siemens S7 (PLC, Studio bloğuyla)", "eposta": "E-posta (SMTP)",
+    "opcua": "OPC UA (PLC / SCADA)", "eposta": "E-posta (SMTP)",
 }
+# Eski sürümlerde Siemens S7 çıkışı Studio sahnesindeki blokla gidiyordu. Studio artık arayüzsüz, herkes için aynı hazır
+# sahneyle çalıştığından S7 bu sürümde yok; kayıtlı S7 çıkışları yok sayılır.
 ALANLAR = ("id", "zaman", "kamera", "kamera_ad", "kural", "kural_ad", "kategori", "bolge", "onem", "olasilik", "puan", "ciddi",
            "sure_sn", "kisi", "aciklama", "klip", "kare")
 ORNEK_OLAY = {"id": 0, "zaman": "2026-01-01T12:00:00", "kamera": "deneme", "kamera_ad": "Deneme kamerası", "kural": "arac_yaya",
@@ -249,7 +251,7 @@ def ilet(b: dict, o: dict) -> None:
     elif tur == "eposta":
         eposta_gonder(b, f"[İSG Kamera] {o['kural_ad']} · {o['kamera_ad']}", metin(o))
     elif tur == "s7":
-        raise ValueError("Siemens S7 çıkışı yalnızca Studio sahnesindeki blokla çalışır; deneme iletisi gönderilemez")
+        raise ValueError("Siemens S7 çıkışı bu sürümde desteklenmiyor")
     else:
         raise ValueError(f"bilinmeyen bağlantı türü: {tur}")
 
@@ -277,8 +279,8 @@ def _hata_metni(e: Exception) -> str:
 
 def gonder(olay_kimlikleri: list[int]) -> list[str]:
     """Yeni olayları açık bağlantılara iletir. Dönüş: ekrana yazılacak kısa notlar (hata dahil)."""
-    # "Studio bloğuyla" işaretli çıkışlar panelden değil, Studio sahnesindeki bloklardan gider
-    hedefler = [b for b in depo.genel().get("baglantilar") or [] if b.get("acik", True) and not b.get("studio")]
+    # Bütün çıkışları panel gönderir (Studio arayüzsüz, hazır sahneyle çalışır; sahnede çıkış bloğu yoktur)
+    hedefler = [b for b in depo.genel().get("baglantilar") or [] if b.get("acik", True) and b.get("tur") != "s7"]
     if not hedefler or not olay_kimlikleri:
         return []
     olaylar = depo.sor(f"SELECT * FROM olay WHERE id IN ({', '.join('?' * len(olay_kimlikleri))}) ORDER BY id", *olay_kimlikleri)
@@ -349,7 +351,7 @@ def temizle(b: dict) -> dict:
     elif tur == "s7":
         out.update(sunucu=yazi("sunucu", 200), port=sayi("port", 102, 1, 65535), raf=sayi("raf", 0, 0, 7), yuva=sayi("yuva", 1, 0, 31),
                    db=sayi("db", 1, 1, 65535), bayt=sayi("bayt", 0, 0, 65535), bit=sayi("bit", 0, 0, 7))
-    out["studio"] = tur == "s7" or (tur in ("modbus", "mqtt", "opcua") and bool(b.get("studio")))
+    out["studio"] = False  # eski "Studio bloğuyla gönder" seçeneği: artık bütün çıkışları panel gönderir
     if tur in ("mqtt", "modbus", "eposta", "s7") and not out.get("sunucu"):
         raise SystemExit("Sunucu adresi yazılmamış.")
     return out

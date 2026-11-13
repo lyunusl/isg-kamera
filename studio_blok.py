@@ -213,3 +213,52 @@ def imza() -> str:
     import json
 
     return hashlib.sha1(json.dumps(TANIMLAR, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
+
+def dosya_metni(t: dict) -> str:
+    """Bloğun Studio'nun özel blok klasörüne konacak dosyası: Studio'nun node.custom.create ile tanımdan ürettiği dosyanın
+    aynısı. Arayüzsüz çalışmada (studio run) Studio açık olmadığından dosyayı panel kendisi yazar."""
+    op = t["opCode"]
+    girisler = ",\n".join(f"        SocketTypes.{g['type']}({g['name']!r}, multiple=False)" for g in t["inputs"])
+    cikislar = ",\n".join(f"        SocketTypes.{c['type']}({c['name']!r}, multiple=False)" for c in t["outputs"])
+    adlar = ", ".join(repr(c["name"]) for c in t["outputs"])
+    if len(t["outputs"]) == 1:
+        adlar += ","
+    islem = "".join(("        " + s if s.strip() else "") + "\n" for s in t["processCode"].rstrip("\n").split("\n"))
+    girdi = ",\n".join(f"            {g['name']!r}: self.input[{g['name']!r}].data" for g in t["inputs"])
+    cikti = ",\n".join(f"            {c['name']!r}: None" for c in t["outputs"])
+    ithal = "".join(f"import {m}\n" for m in t.get("imports") or [])
+    return (
+        "from studio.custom_block import (\n"
+        "    Block, CheckBox, DropDown, Label, SocketTypes, TextInput, add_block,\n"
+        ")\n\n"
+        f"{ithal}\n"
+        f"class {op}(Block):\n"
+        f"    op_code = {op!r}\n"
+        f"    input_sockets = [\n{girisler}\n    ]\n"
+        f"    output_sockets = [\n{cikislar}\n    ]\n"
+        "    _augelab_generated_spec_version = 1\n"
+        f"    _augelab_output_names = ({adlar})\n\n"
+        "    def init(self):\n"
+        f"        self.op_title = {t['title']!r}\n"
+        "        self.width = 280\n"
+        "        self.height = 150\n"
+        f"        self.tooltip = {t['description']!r}\n"
+        "        pass\n"
+        "        self._augelab_generated_state = {}\n\n"
+        "    @staticmethod\n"
+        "    def _process(inputs, parameters, state, outputs):\n"
+        f"{islem}\n"
+        "    def run(self):\n"
+        f"        inputs = {{\n{girdi}\n        }}\n"
+        "        parameters = {\n            \n        }\n"
+        "        state = self._augelab_generated_state\n"
+        f"        outputs = {{\n{cikti}\n        }}\n"
+        "        self._process(inputs, parameters, state, outputs)\n"
+        "        unknown = set(outputs).difference(self._augelab_output_names)\n"
+        "        if unknown:\n"
+        "            raise ValueError(f\"Undeclared generated outputs: {sorted(unknown)}\")\n"
+        "        for output_name in self._augelab_output_names:\n"
+        "            self.output[output_name].data = outputs[output_name]\n\n\n"
+        f"add_block({op}.op_code, {op})\n"
+    )

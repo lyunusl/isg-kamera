@@ -150,14 +150,66 @@ def ac(src):
 
 
 def yuzleri_gizle(kare):
-    """Bölge çizme karesindeki yüzleri gizler (Studio'daki motorun aynı modeli ve aynı gizleme kodu)."""
+    """Bölge çizme karesindeki yüzleri gizler (Studio'daki motorun aynı modeli ve aynı gizleme kodu).
+    Dönüş: (kare, gizlenen bölge sayısı)."""
     import kurallar  # noqa: F401  (motor klasörünü yola ekler)
+    from isg_motor import community_model
+
+    if community_model.isaretli(yollar.MOTOR / "modeller"):  # şifreli paket yalnızca Studio'da açılır
+        return _studioda_gizle(kare)
     from isg_motor.algila import Algilayici
-    from isg_motor.kayit import yuzleri_gizle as gizle
+    from isg_motor.kayit import yuz_bolgeleri, yuzleri_gizle as gizle
 
     tespitler = Algilayici(str(yollar.MOTOR / "modeller"), [kurallar.MODEL_PLANI[0]], str(yollar.VERI)).calistir(kare)
     gizle(kare, tespitler)
-    return kare
+    return kare, len(yuz_bolgeleri(tespitler))
+
+
+def _studioda_gizle(kare):
+    """Yüzleri açık kare diske yazılmaz: Studio koşusu onu bu süreçteki tek seferlik yerel bir adresten bellekten alır."""
+    import cv2
+    import secrets
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    import studio
+
+    ok, png = cv2.imencode(".png", kare)
+    if not ok:
+        raise OSError("kare kodlanamadı")
+    veri = {"png": png.tobytes()}
+    yol = "/" + secrets.token_hex(16)
+
+    class Ver(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            govde = veri.pop("png", None) if self.path == yol else None  # yalnızca bir kez
+            if govde is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(govde)))
+            self.end_headers()
+            self.wfile.write(govde)
+
+    sunucu = HTTPServer(("127.0.0.1", 0), Ver)
+    threading.Thread(target=sunucu.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
+    studio.KOSU_KLASORU.mkdir(parents=True, exist_ok=True)
+    cikti = studio.KOSU_KLASORU / f"yuz-{secrets.token_hex(4)}.png"
+    try:
+        sayi = studio.yuzleri_gizle(f"http://127.0.0.1:{sunucu.server_address[1]}{yol}", cikti)
+        gizli = cv2.imread(str(cikti))
+        if gizli is None:
+            raise OSError("gizlenmiş kare okunamadı")
+        return gizli, sayi
+    finally:
+        sunucu.shutdown()
+        sunucu.server_close()
+        veri.clear()
+        cikti.unlink(missing_ok=True)
 
 
 def test(ayar: dict, ayar_yol: Path, sifre: str | None = None) -> int:
@@ -186,8 +238,9 @@ def test(ayar: dict, ayar_yol: Path, sifre: str | None = None) -> int:
     print(f"BAĞLANDI: {W}x{H}, {fps:.0f} fps, {time.time() - t0:.1f} sn. Yüzler gizleniyor…", flush=True)
     yol = yollar.AYAR / f"_kare_{kod(ayar, ayar_yol)}.jpg"
     yol.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(yol), yuzleri_gizle(kare))  # bölge çizmek için; yüzler gizli
-    print("Bölge çizmek için kare kaydedildi (yüzler gizli):", yol.name, flush=True)
+    gizli, sayi = yuzleri_gizle(kare)
+    cv2.imwrite(str(yol), gizli)  # bölge çizmek için; yüzler gizli
+    print(f"Kare kaydedildi: {sayi} yüz gizlendi." if sayi else "Kare kaydedildi: görüntüde kişi bulunamadı.", flush=True)
     if W > 1920:
         print("Not: çözünürlük yüksek; analiz için alt akış (720p) yeterli ve çok daha hızlı.", flush=True)
     return 0

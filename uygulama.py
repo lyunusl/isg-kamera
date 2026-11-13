@@ -289,9 +289,25 @@ def _studio(korutin):
     return asyncio.run(korutin)
 
 
+def is_studio_dene(is_: Is) -> dict:
+    """Studio lisansını bir kez kontrol eder: Studio arka planda kısa süre çalışır, İSG modelleri açılır (şifreli paket lisansı
+    burada doğrulanır). Sonuç saklanır; sonraki açılışlarda yeniden yapılmaz."""
+    import studio
+
+    print("Lisans kontrol ediliyor…", flush=True)
+    try:
+        sonuc = studio.dene()
+    except studio.StudioHatasi as e:
+        raise SystemExit(str(e)) from None
+    finally:
+        _STUDIO["an"] = 0.0
+    print("Hazır: lisans doğrulandı.", flush=True)
+    return {}
+
+
 def _tespit_hatasi(neden: str | None) -> str:
-    return (f"Studio'daki tespit çalışmıyor ({neden}). Kişiler bulunamadığı için görüntü kaydedilmedi; "
-            "motor/modeller klasöründeki model dosyalarını ve Studio'da İSG Algılama bloğunun Durum çıkışını kontrol edin.")
+    return (f"AugeLab Studio'daki tespit çalışmıyor ({neden}). Kişiler bulunamadığı için görüntü kaydedilmedi; "
+            "model dosyalarını ve AugeLab Studio lisansınızı kontrol edin.")
 
 
 KUYRUK_BOSALMADI = ("Studio'dan gelen son kayıtlar işlenemedi (kuyruk boşalmadı). Açık olaylar ve yarım klipler olduğu gibi bırakıldı; "
@@ -309,8 +325,8 @@ def _sahneyi_kapat(kod: str, durdur, bekle_sn: float) -> str | None:
     try:
         _studio(durdur())
     except Exception as e:
-        return (f"Studio'daki sahnenin durduğu doğrulanamadı ({type(e).__name__}: {e}). Sahne hâlâ çalışıyor olabilir; açık olaylar ve "
-                "yarım klipler olduğu gibi bırakıldı. Studio'da sahneyi durdurun.")
+        return (f"AugeLab Studio sürecinin durduğu doğrulanamadı ({type(e).__name__}: {e}). Açık olaylar ve "
+                "yarım klipler olduğu gibi bırakıldı. Programı kapatıp yeniden açın.")
     time.sleep(bekle_sn)  # sahnenin son kayıtları kuyruğa düşsün
     if not kuyruk.bosalsin(kod):  # bu koşunun bütün kayıtları içeri alınmalı, klipleri dönüştürülmeli
         return KUYRUK_BOSALMADI
@@ -323,7 +339,7 @@ def studioda_analiz(is_: Is, kod: str, en_cok_sn: float = 1800.0) -> None:
     import studio
 
     ayar = ayar_oku(kod)
-    print("  AugeLab Studio'ya bağlanılıyor; bloklar ve sahne hazırlanıyor", flush=True)
+    print("  AugeLab Studio hazırlanıyor (arayüzsüz; pencere açılmaz)", flush=True)
     bilgi = _studio(studio.sahne_kur(kod, ayar))
     kuyruk.BITENLER.pop(kod, None)
     kuyruk.HATALAR.pop(kod, None)
@@ -335,7 +351,7 @@ def studioda_analiz(is_: Is, kod: str, en_cok_sn: float = 1800.0) -> None:
 
     kosu = _studio(baslat())  # kuyruk kayıtları bu numarayı taşır: önceki çalıştırmadan kalan kayıt bu işe sayılmaz
     hata: BaseException | None = None
-    print("  sahne Studio'da çalışıyor (ilk çalıştırmada modelin yüklenmesi birkaç saniye sürer)", flush=True)
+    print("  sahne AugeLab Studio'da arayüzsüz çalışıyor (ilk çalıştırmada Studio ve modellerin yüklenmesi biraz sürer)", flush=True)
     bas = time.time()
     try:
         while True:
@@ -343,15 +359,17 @@ def studioda_analiz(is_: Is, kod: str, en_cok_sn: float = 1800.0) -> None:
                 raise SystemExit(_tespit_hatasi(kuyruk.kosu_hatasi(kod, kosu)))
             if kuyruk.kosu_bitti(kod, kosu):
                 break
+            if studio.kosu_sorunu(bilgi):
+                raise SystemExit(studio.kosu_sorunu(bilgi))
             if is_.dur.is_set():
                 print("  durduruldu", flush=True)
                 break
             if time.time() - bas > en_cok_sn:
-                raise SystemExit("Studio'daki sahne beklenen sürede bitmedi. Studio'da sahneyi açıp Durum çıkışına bakın.")
+                raise SystemExit("AugeLab Studio'daki analiz beklenen sürede bitmedi.")
             son = kuyruk.SON_KAYIT.get(kod, 0.0)
             # ilk kayıttan önce daha uzun beklenir: motor yenilendiyse Studio blokları ve modelleri baştan yükler
             if time.time() - max(bas, son) > (90 if son > bas else 240):
-                raise SystemExit("Studio'dan uzun süredir kayıt gelmedi. Studio'da İSG sahnesindeki blokların Durum çıkışına bakın.")
+                raise SystemExit("AugeLab Studio'dan uzun süredir kayıt gelmedi. Kurulum sihirbazındaki “Studio’yu dene” adımıyla kontrol edin.")
             time.sleep(0.5)
     except BaseException as e:  # iş hatası: sahne yine de kapatılır, hata aşağıda yeniden yükseltilir
         hata = e
@@ -431,7 +449,7 @@ def is_izle(is_: Is, kod: str, sifre: str | None, dakika: float) -> dict:
         raise SystemExit("Canlı izleme IP kamera, kayıt cihazı ya da HTTP akışı içindir. Video dosyası için Videoyu analiz et'i kullanın.")
     adres, goster = kamera.kaynak(ayar, sifre)
     print(f"{ayar.get('ad', kod)}: {goster}", flush=True)
-    print("  AugeLab Studio'ya bağlanılıyor; bloklar ve sahne hazırlanıyor", flush=True)
+    print("  AugeLab Studio hazırlanıyor (arayüzsüz; pencere açılmaz)", flush=True)
     bilgi = _studio(studio.sahne_kur(kod, ayar))
     kuyruk.SON_KAYIT.pop(kod, None)
     kuyruk.HATALAR.pop(kod, None)
@@ -446,16 +464,18 @@ def is_izle(is_: Is, kod: str, sifre: str | None, dakika: float) -> dict:
         try:
             await studio.durdur(bilgi)
         finally:
-            await studio.kamera_adresi(bilgi, "")  # adres şifre içerebilir: sahnede bırakılmaz
+            await studio.kamera_adresi(bilgi, "")  # adres şifre içerebilir: bellekte bırakılmaz
 
     kosu = _studio(baslat())
-    print("  sahne Studio'da çalışıyor; durdurulana kadar izlenir", flush=True)
+    print("  sahne AugeLab Studio'da arayüzsüz çalışıyor; durdurulana kadar izlenir", flush=True)
     bas, uyarildi = time.time(), False
     hata: BaseException | None = None
     try:
         while not is_.dur.is_set():
             if kuyruk.kosu_hatasi(kod, kosu):
                 raise SystemExit(_tespit_hatasi(kuyruk.kosu_hatasi(kod, kosu)))
+            if studio.kosu_sorunu(bilgi):
+                raise SystemExit(studio.kosu_sorunu(bilgi))
             son = kuyruk.SON_KAYIT.get(kod, 0.0)
             if not uyarildi and time.time() - max(bas, son) > 45:
                 uyarildi = True
@@ -556,17 +576,18 @@ def _studio_yokla() -> None:
     try:
         import studio
 
-        _STUDIO["durum"] = {"bagli": True, **_studio(studio.durum())}
+        d = _studio(studio.durum())
+        _STUDIO["durum"] = {"bagli": d.get("hazir") is True, "kurulu": True, **d}
     except Exception as e:
-        _STUDIO["durum"] = {"bagli": False, "mesaj": str(e)[:200]}
+        _STUDIO["durum"] = {"bagli": False, "kurulu": False, "mesaj": str(e)[:200]}
     finally:
         _STUDIO["an"] = time.time()
         _STUDIO["yokluyor"] = False
 
 
 def studio_durumu() -> dict:
-    """AugeLab Studio'ya bağlanılabiliyor mu. Yoklama 5 saniyede bir arka planda yapılır; bu işlev hiç beklemez
-    (Studio kapalıyken bir yoklama yeniden denemelerle 10 saniyeyi aşabilir) ve son bilinen durumu döndürür."""
+    """AugeLab Studio arayüzsüz çalışmaya hazır mı (kurulu ve deneme geçti). Yoklama arka planda yapılır ve Studio'yu
+    çalıştırmaz; bu işlev hiç beklemez ve son bilinen durumu döndürür."""
     with _STUDIO_KILIDI:
         if not _STUDIO["yokluyor"] and time.time() - _STUDIO["an"] > 5:
             _STUDIO["yokluyor"] = True
@@ -887,7 +908,8 @@ class Istek(BaseHTTPRequestHandler):
 
         if yol in ("/api/is/ornek", "/api/is/test", "/api/is/izle", "/api/is/video"):
             kilit = model_kilidi()
-            if kilit["sifreli"] and kilit["durum"] != "etkin":
+            studio_dogrular = kilit.get("community") and kilit["durum"] == "studio_kosusunda_dogrulanir"
+            if kilit["sifreli"] and kilit["durum"] != "etkin" and not studio_dogrular:
                 mesaj = ("Analizi başlatmak için sayfanın üstündeki alana etkinleştirme kodunu girin."
                          if kilit["durum"] == "anahtar_yok" else kilit.get("mesaj") or "Modeller etkinleştirilmedi.")
                 return self._json({"hata": mesaj}, 409)
@@ -925,15 +947,21 @@ class Istek(BaseHTTPRequestHandler):
             import studio_kurulum
 
             ok, m = is_baslat("studio-kurulum", "AugeLab Studio kurulumu", studio_kurulum.kur)
-        elif yol == "/api/studio/ac":
+        elif yol == "/api/studio/lisans":
+            import studio
             import studio_kurulum
 
             if self._mesgul():
-                return self._json({"hata": "Çalışan işlem bitince Studio'yu açın."}, 409)
-            if (studio_durumu() or {}).get("bagli"):
-                return self._json({"tamam": True})
-            studio_kurulum.ac()
-            return self._json({"tamam": True})
+                return self._json({"hata": "Çalışan işlem bitince lisans kodunu girin."}, 409)
+            try:
+                studio_kurulum.lisans_kaydet(str(g.get("kod") or ""))  # kod saklanmaz, günlüğe yazılmaz
+            except SystemExit as e:
+                return self._json({"hata": str(e.code or "Lisans kodu kaydedilemedi.")}, 400)
+            studio.kaydet(lisans=time.time(), hazir=None)
+            _STUDIO["an"] = 0.0
+            ok, m = is_baslat("studio-dene", "AugeLab Studio lisans kontrolü", is_studio_dene)
+        elif yol == "/api/studio/dene":
+            ok, m = is_baslat("studio-dene", "AugeLab Studio lisans kontrolü", is_studio_dene)
         elif yol == "/api/is/ornek":
             ok, m = is_baslat("ornek", "Örnek analiz", is_ornek)
         elif yol in ("/api/is/test", "/api/is/izle", "/api/is/video"):
@@ -1085,6 +1113,12 @@ class Istek(BaseHTTPRequestHandler):
 def kapat(sunucu) -> None:
     time.sleep(0.4)
     print("İSG Kamera kapatılıyor.", flush=True)
+    try:
+        import studio
+
+        studio.durdur_hepsi()  # arayüzsüz Studio süreçleri arkada kalmasın
+    except Exception:
+        pass
     sunucu.shutdown()
 
 

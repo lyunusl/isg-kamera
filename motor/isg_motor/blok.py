@@ -24,6 +24,30 @@ from .kayit import Kayitci, ciz, kuyruga_birak
 from .kural import Motor
 
 KOK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Arayüzsüz koşu (python -m studio run): panel her kamera için sahne şablonunu ayrı bir süreçte çalıştırır ve kameranın
+# kimliğini bu ortam değişkenleriyle verir. Şablondaki "İSG Kamera Kodu" girişi o zaman yok sayılır.
+ORTAM_KAMERA = "ISG_KAMERA"        # "kod#koşu"
+ORTAM_ADRES = "ISG_KAMERA_ADRES"   # canlı kameranın akış adresi (şifre içerebilir: dosyaya yazılmaz)
+ORTAM_DUR = "ISG_DUR"              # bu dosya oluşunca akış biter: açık olaylar kapanış kaydı bırakır
+ORTAM_DENEME_SONUC = "ISG_DENEME_SONUC"  # deneme koşusunda modellerin açılıp açılmadığı bu dosyaya yazılır
+DENEME_KOD = "_deneme"             # panelin "Studio'yu dene" koşusu: kamera yok, siyah kare ile modeller (ve lisans) sınanır
+# Deneme koşusunda bu iki değişken verilirse siyah kare yerine bu kare kullanılır, yüzleri gizlenip ISG_YUZ_CIKTI'ya yazılır
+# (bağlantı denemesinin bölge çizme karesi: şifreli modeller yalnızca Studio'da açılır). Kare diske yazılmaz: panel onu
+# 127.0.0.1'deki tek seferlik bir adresten verir.
+ORTAM_YUZ_KARE = "ISG_YUZ_KARE"
+ORTAM_YUZ_CIKTI = "ISG_YUZ_CIKTI"
+
+
+def _yerel_kare(adres: str):
+    """Panelin verdiği kareyi bellekten alır (yalnızca 127.0.0.1; vekil sunucu kullanılmaz)."""
+    import urllib.request
+
+    if not adres.startswith("http://127.0.0.1:"):
+        return None
+    acici = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with acici.open(adres, timeout=15) as r:
+        veri = r.read(64 * 1024 * 1024)
+    return cv2.imdecode(np.frombuffer(veri, np.uint8), cv2.IMREAD_COLOR)
 OLCUM_ARALIGI = 30.0  # saniye: ısı haritası ve sayılar bu aralıkla panele bırakılır
 
 
@@ -34,7 +58,9 @@ def _hata_json(neden: str) -> str:
 
 
 def kod_ve_kosu(kamera_kod) -> tuple[str, str]:
-    """Kamera girişi "kod" ya da "kod#koşu" biçimindedir; koşu değişince bloklar baştan başlar."""
+    """Kamera girişi "kod" ya da "kod#koşu" biçimindedir; koşu değişince bloklar baştan başlar.
+    Arayüzsüz koşuda kamera ortam değişkeninden gelir ve girişteki değerin yerini alır."""
+    kamera_kod = os.environ.get(ORTAM_KAMERA) or kamera_kod
     kod, _, kosu = str(kamera_kod or "").strip().partition("#")
     return kod.strip(), kosu
 
@@ -68,31 +94,126 @@ def _bos_kare(state: dict, sinir: int = 10) -> bool:
     return state["bos"] == sinir
 
 
+class _CanliOkuyucu:
+    """Canlı akışı arka planda okur ve yalnızca son kareyi tutar: analiz kare hızından yavaşken gecikme birikmesin.
+    Bağlantı koparsa birkaç saniyede bir yeniden bağlanır."""
+
+    def __init__(self, adres: str):
+        import threading
+
+        self.adres, self.kare, self.sira, self.durum = adres, None, 0, "bekliyor: kameraya bağlanılıyor"
+        self._dur = threading.Event()
+        self._kilit = threading.Lock()
+        threading.Thread(target=self._oku, name="isg-canli", daemon=True).start()
+
+    def _oku(self) -> None:
+        bekle = 1.0
+        while not self._dur.is_set():
+            cap = cv2.VideoCapture(self.adres, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                cap.release()
+                self.durum = "bekliyor: kameraya bağlanılamadı, yeniden deneniyor"
+                self._dur.wait(bekle)
+                bekle = min(10.0, bekle * 2)
+                continue
+            bekle = 1.0
+            while not self._dur.is_set():
+                ok, fr = cap.read()
+                if not ok:
+                    self.durum = "bekliyor: görüntü kesildi, yeniden bağlanılıyor"
+                    break
+                with self._kilit:
+                    self.kare, self.sira = fr, self.sira + 1
+            cap.release()
+
+    def son(self):
+        with self._kilit:
+            return self.kare, self.sira
+
+    def kapat(self) -> None:
+        self._dur.set()
+
+
+def _durduruldu() -> bool:
+    """Panel arayüzsüz koşuyu durdururken önce bu dosyayı oluşturur: akış "bitti" olur, açık olaylar kapanır."""
+    dur = os.environ.get(ORTAM_DUR)
+    return bool(dur) and os.path.exists(dur)
+
+
+def _video_ac(state: dict, kod: str, kosu: str) -> str | None:
+    """Kaynağı açar. Dönüş: hata durumu ya da None."""
+    state["kosu"] = kosu
+    try:
+        ayar, _ = kamera_ayari(kod)
+    except Exception as e:
+        return f"hata: kamera ayarı okunamadı ({kod}): {e}"
+    kamera = ayar.get("kamera") or {}
+    if kamera.get("tur") in ("rtsp", "onvif", "http"):
+        adres = os.environ.get(ORTAM_ADRES, "")
+        if not adres:
+            return "hata: kameranın akış adresi verilmedi (sahneyi İSG Kamera paneli başlatır)"
+        state.update(kod=kod, canli=_CanliOkuyucu(adres), sira=0, n=0, bitti=False)
+        return None
+    if kamera.get("tur") != "dosya":
+        return "hata: bu kamera türü İSG Video ile okunamıyor"
+    yol = kamera.get("yol", "")
+    yol = yol if os.path.isabs(yol) else os.path.join(veri_klasoru(), yol)
+    cap = cv2.VideoCapture(yol)
+    if not cap.isOpened():
+        return f"hata: video açılamadı: {os.path.basename(yol)}"
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    state.update(kod=kod, cap=cap, fps=fps if 1 <= fps <= 120 else 25.0, n=0, toplam=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), bitti=False)
+    return None
+
+
+def _video_kapat(state: dict) -> None:
+    if state.get("cap") is not None:
+        state["cap"].release()
+    if state.get("canli") is not None:
+        state["canli"].kapat()
+    state.clear()
+
+
 def video(state: dict, kamera_kod: str):
-    """İSG Video bloğu: kameranın ayarındaki video dosyasını kare kare okur.
-    Dönüş: (görüntü | None, zaman (sn), bitti, durum). Dosya bitince bir kez bitti=True döner, sonra görüntü vermez."""
+    """İSG Video bloğu: kameranın ayarındaki video dosyasını kare kare okur. Arayüzsüz koşuda canlı kameranın akışını da
+    okur (adres ortam değişkeninden gelir).
+    Dönüş: (görüntü | None, zaman (sn; canlı akışta -1: duvar saati kullanılır), bitti, durum). Dosya bitince ya da panel
+    durdurunca bir kez bitti=True döner, sonra görüntü vermez."""
     kod, kosu = kod_ve_kosu(kamera_kod)
+    if kod == DENEME_KOD:  # deneme koşusu: modelleri sınamak için siyah bir kare yeter
+        ham = os.environ.get(ORTAM_YUZ_KARE)
+        if ham:
+            if "ham" not in state:
+                try:
+                    state["ham"] = _yerel_kare(ham)
+                except Exception:
+                    state["ham"] = None
+            if state["ham"] is None:
+                return None, 0.0, False, "hata: kare okunamadı"
+            return state["ham"].copy(), -1.0, False, "ok bağlantı karesi"
+        return np.zeros((360, 640, 3), np.uint8), -1.0, False, "ok deneme karesi"
     if state.get("kod") != kod or state.get("kosu") != kosu:
-        if state.get("cap") is not None:
-            state["cap"].release()
-        state.clear()
-        state["kosu"] = kosu
-        try:
-            ayar, _ = kamera_ayari(kod)
-        except Exception as e:
-            return None, 0.0, False, f"hata: kamera ayarı okunamadı ({kod}): {e}"
-        kamera = ayar.get("kamera") or {}
-        if kamera.get("tur") != "dosya":
-            return None, 0.0, False, "hata: bu kamera bir video dosyası değil"
-        yol = kamera.get("yol", "")
-        yol = yol if os.path.isabs(yol) else os.path.join(veri_klasoru(), yol)
-        cap = cv2.VideoCapture(yol)
-        if not cap.isOpened():
-            return None, 0.0, False, f"hata: video açılamadı: {os.path.basename(yol)}"
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-        state.update(kod=kod, cap=cap, fps=fps if 1 <= fps <= 120 else 25.0, n=0, toplam=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), bitti=False)
+        _video_kapat(state)
+        hata = _video_ac(state, kod, kosu)
+        if hata:
+            return None, 0.0, False, hata
+    canli = state.get("canli")
     if state["bitti"]:
-        return None, state["n"] / state["fps"], False, f"bitti: {state['n']} kare"
+        return None, -1.0 if canli else state["n"] / state["fps"], False, f"bitti: {state['n']} kare"
+    if _durduruldu():
+        state["bitti"] = True
+        if canli:
+            canli.kapat()
+        else:
+            state["cap"].release()
+        return None, -1.0 if canli else state["n"] / state["fps"], True, f"bitti: durduruldu, {state['n']} kare"
+    if canli:
+        kare, sira = canli.son()
+        if kare is None or sira == state["sira"]:
+            return None, -1.0, False, canli.durum if kare is None else "ok: yeni kare bekleniyor"
+        state["sira"] = sira
+        state["n"] += 1
+        return kare, -1.0, False, f"ok {state['n']} kare"
     ok, fr = state["cap"].read()
     if not ok:
         state["bitti"] = True
@@ -111,6 +232,8 @@ def algila(state: dict, image, kamera_kod: str) -> tuple[str, str]:
             state.pop("imza", None)  # akış bitti: modeller bellekten bırakılır, görüntü yeniden gelirse baştan yüklenir
         return "[]", "bekliyor: görüntü yok"
     state["bos"] = 0
+    if kod_ve_kosu(kamera_kod)[0] == DENEME_KOD:
+        return _model_deneme(state, fr)
     try:
         ayar, degisim = kamera_ayari(kod_ve_kosu(kamera_kod)[0])
     except Exception as e:
@@ -133,6 +256,43 @@ def algila(state: dict, image, kamera_kod: str) -> tuple[str, str]:
     except Exception as e:
         return _hata_json(f"tespit çalışmadı: {type(e).__name__}"), f"hata: tespit çalışmadı: {type(e).__name__}: {e}"
     return json.dumps(tespitler), f"ok {len(tespitler)} tespit · {1000 * (time.perf_counter() - t0):.0f} ms · {state['algilayici'].ozet()}"
+
+
+def _model_deneme(state: dict, fr) -> tuple[str, str]:
+    """"Studio'yu dene": varsayılan model planını açıp bir kare çalıştırır (şifreli paketlerde lisans kontrolü burada olur) ve
+    sonucu ORTAM_DENEME_SONUC dosyasına bir kez yazar. Kamera ayarı gerekmez."""
+    if state.get("deneme_yazildi"):
+        return "[]", state.get("deneme_durum", "deneme bitti")
+    sonuc = {"ok": False, "hata": ""}
+    cikti = os.environ.get(ORTAM_YUZ_CIKTI) if os.environ.get(ORTAM_YUZ_KARE) else None
+    try:
+        plan = [katalog.MODEL_PLANI[0]] if cikti else katalog.model_plani({})
+        algilayici = Algilayici(os.path.join(KOK, "modeller"), plan, veri_klasoru())
+        tespitler = algilayici.calistir(fr)
+        ek = {}
+        if cikti:
+            from .kayit import yuz_bolgeleri, yuzleri_gizle
+
+            kare = fr.copy()
+            yuzleri_gizle(kare, tespitler)
+            if not cv2.imwrite(cikti, kare):
+                raise OSError("gizlenmiş kare yazılamadı")
+            ek["yuz"] = len(yuz_bolgeleri(tespitler))
+        sonuc = {"ok": True, "ozet": algilayici.ozet(), **ek}
+    except model_lisans.LisansHatasi as e:
+        sonuc["hata"] = f"lisans: {e}"
+    except Exception as e:  # model dosyası yok, paket açılamadı, onnxruntime yüklenemedi...
+        sonuc["hata"] = f"{type(e).__name__}: {e}"
+    yol = os.environ.get(ORTAM_DENEME_SONUC)
+    if yol:
+        try:
+            with open(yol, "w", encoding="utf-8") as f:
+                json.dump(sonuc, f, ensure_ascii=False)
+        except OSError:
+            pass
+    state["deneme_yazildi"] = True
+    state["deneme_durum"] = "ok modeller açıldı" if sonuc["ok"] else f"hata: {sonuc['hata']}"
+    return "[]", state["deneme_durum"]
 
 
 def iskelet(state: dict, image, tespit_json: str) -> tuple[str, str]:
@@ -241,7 +401,7 @@ def kurallar(state: dict, image, tespit_json: str, kamera_kod: str, zaman=None, 
         t = float(zaman) if zaman is not None and str(zaman) != "" else None
     except (TypeError, ValueError):
         t = None
-    if t is None:
+    if t is None or t < 0:  # canlı akış (İSG Video -1 verir) ya da zaman girişi bağlı değil: duvar saati
         t = time.monotonic() - state["t0"]
     if state["son_t"] is not None and t > state["son_t"]:  # gerçek kare aralığının yumuşatılmış ortalaması
         aralik = min(1.0, max(0.02, t - state["son_t"]))

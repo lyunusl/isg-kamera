@@ -101,24 +101,27 @@ async function sayfaKontrol() {
   $('#sayfa').innerHTML = ust('Kontrol Odası', `${h(d.tesis)} · en riskli uyarılar üstte`, donemSec()) + modelUyarisi() + govde;
 }
 /* ------------------------------------------------------------ AugeLab Studio kurulum sihirbazı
-   Fişoku'daki gibi: Studio'ya bağlanılamadığında tam ekran açılır ve kur → aç → bağlan → hazır adımlarını yürütür.
+   Fişoku'daki gibi adım adım: Studio'yu kur → AugeLab hesabı → lisans kodu → hazır. Studio penceresi hiç açılmaz:
+   İSG Kamera Studio'yu arayüzsüz kullanır (lisans kodu da Studio'nun kendi komutuyla arayüzsüz kaydedilir).
    Kurulum sürerken AugeLab hesap sayfası pencerenin içinde açılır (hesabı olmayan o sırada üye olur). Var olan hesapla
    girişi çerçevede yapmaz: Google/Microsoft girişi çerçevede çalışmaz, lisans kodu ayrı bir pencerede alınır. */
-const SH = { kapatildi: false, cevrimdisi: 0, bagliBasi: 0, hesapVar: false, zamanlayici: null };
+const SH = { kapatildi: false, cevrimdisi: 0, hesapVar: false, zamanlayici: null, kod: '', hata: '', otoDeneme: false };
 try { SH.hesapVar = localStorage.getItem('isg-augelab-hesap') === '1'; } catch (x) { /* depolama kapalı */ }
 const SH_KURULUM = ['indiriliyor', 'vc', 'kuruluyor', 'pencere'];
 const shMb = b => (b / 1048576).toFixed(1).replace('.', ',');
 function shHesapUrl() { return S.durum?.hesap_url || 'https://account.augelab.com/'; }
+function shDeniyor(d) { return d?.is?.tur === 'studio-dene' && d?.is?.durum === 'calisiyor'; }
 function shAdim(d) {
   const k = d?.studio_kurulum || {};
-  if (d?.studio?.bagli) return 3;
   const kuruluyor = (d?.is?.tur === 'studio-kurulum' && d?.is?.durum === 'calisiyor') || SH_KURULUM.includes(k.asama);
   if (!d?.studio_kurulu || kuruluyor) return 0;
-  return k.calisiyor ? 2 : 1;
+  if (d?.studio?.bagli && !shDeniyor(d)) return 3;
+  if (!SH.hesapVar && !d?.studio?.lisans_kaydedildi && !shDeniyor(d)) return 1;
+  return 2;
 }
 function shHesap(adim, d) {
   const k = d?.studio_kurulum || {};
-  const goster = adim === 0 && SH_KURULUM.includes(k.asama) && !SH.hesapVar;
+  const goster = !SH.hesapVar && (adim === 1 || (adim === 0 && SH_KURULUM.includes(k.asama)));
   $('#sh-hesap').hidden = !goster;
   $('#sihirbaz').classList.toggle('genis', goster);
   if (!goster) return;
@@ -130,7 +133,15 @@ function shHesap(adim, d) {
     $('#sh-kaydir').classList.remove('gitti');
   }
   $('#sh-hesap-bag').href = url;
-  $('#sh-hesap-yazi').innerHTML = '<b>AugeLab hesabınız yoksa kurulum sürerken burada oluşturun.</b> Studio’yu etkinleştirmek için gerekli.';
+  $('#sh-hesap-yazi').innerHTML = adim === 0
+    ? '<b>AugeLab hesabınız yoksa kurulum sürerken burada oluşturun.</b> Lisans kodu için gerekli.'
+    : '<b>AugeLab hesabınızı burada oluşturun</b> (e-postanıza gelen bağlantıyla onaylayın). Hesabınız varsa “Hesabım var”a basın.';
+}
+function shSonDeneme(d) {
+  // Son "Studio'yu dene" işi hatayla bittiyse nedeni (lisans yok, kurulum bozuk...).
+  const is = d?.is;
+  if (is?.tur !== 'studio-dene' || is.durum === 'calisiyor' || d?.studio?.bagli) return '';
+  return is.durum === 'hata' ? (is.satirlar || []).slice(-1)[0] || 'Lisans bulunamadı.' : '';
 }
 function shCiz() {
   const d = S.durum;
@@ -153,32 +164,63 @@ function shCiz() {
         `<div class="sh-bekle"><span class="sh-don"></span>${k.asama === 'pencere' ? 'Kurulum penceresindeki adımları tamamlayın. ' : ''}${sure}</div>`)}
     </ol>`;
   } else if (adim === 0) {
-    govde = `<h2>AugeLab Studio kurulu değil</h2><p>İSG Kamera görüntüleri bu bilgisayardaki <b>AugeLab Studio</b> ile analiz eder; görüntüler internete gönderilmez.</p>
-      <p>İSG Kamera, AugeLab Studio’yu AugeLab’den indirip bu bilgisayara kuracak; Visual C++ bileşeni eksikse onu da Microsoft’tan kurar. AugeLab hesabınız yoksa kurulum sürerken bu pencerede oluşturabilirsiniz; varsa mevcut hesabınızı kullanırsınız.</p>
+    govde = `<h2>AugeLab Studio kurulu değil</h2><p>İSG Kamera görüntüleri bu bilgisayardaki <b>AugeLab Studio</b> ile analiz eder; görüntüler internete gönderilmez. Studio arka planda çalışır, penceresi açılmaz.</p>
+      <p>İSG Kamera, AugeLab Studio’yu AugeLab’den indirip bu bilgisayara kuracak; Visual C++ bileşeni eksikse onu da Microsoft’tan kurar.</p>
       ${k.asama === 'hata' && k.hata ? `<p class="hata">${h(k.hata)}</p>` : ''}`;
     eylem = `<button class="dug ana" data-is="studio-kurulum" data-tur="kur"${d.is?.durum === 'calisiyor' ? ' disabled' : ''}>${k.asama === 'hata' ? 'Tekrar dene' : 'İndir ve kur'} →</button>`;
   } else if (adim === 1) {
-    govde = '<h2>AugeLab Studio kurulu</h2><p>Studio şu an kapalı. Kameraların analiz edilmesi için açık olması gerekiyor.</p>';
-    eylem = '<button class="dug ana" data-is="studio-kurulum" data-tur="ac">Studio’yu aç →</button>';
+    govde = '<h2>AugeLab hesabı</h2><p>AugeLab Studio kuruldu. Studio’yu etkinleştiren lisans kodu AugeLab hesabınızda görünür; ücretsiz Community planı yeterli.</p>';
+    eylem = '<button class="dug ana" id="sh-hesap-tamam" type="button">Hesabım hazır →</button>';
   } else if (adim === 2) {
-    // Studio çoğunlukla kendiliğinden bağlanır; lisans kodu yalnızca Studio isterse, MCP düğmesi yalnızca bağlantı gelmezse gerekir.
-    if (!SH.bagliBasi) SH.bagliBasi = Date.now();
-    const yavas = Date.now() - SH.bagliBasi > 20000;
-    govde = `<h2>Studio’ya bağlan</h2>
-      <div class="sh-bekle"><span class="sh-don"></span>Studio’ya bağlanılması bekleniyor…</div>
-      <ol class="yap" style="margin-top:14px">
-        <li><b>Studio lisans kodu istiyorsa</b> (<i>Verification Window</i>): aşağıdaki düğmeyle AugeLab hesabınıza giriş yapın (Google, Microsoft ya da e-posta), kodu kopyalayıp Studio’daki pencereye yapıştırın ve <b>VERIFY</b>’a basın.
-          <div style="margin-top:8px"><button class="dug ana" data-is="hesap-ac">Lisans kodumu al ↗</button></div></li>
-        ${yavas ? '<li><b>Studio ana ekranı açık ama bağlantı gelmediyse:</b> <kbd>AI Tools</kbd> → <kbd>AI Chat Window</kbd> → <kbd>Settings</kbd> → <kbd>MCP configuration</kbd> bölümünde <b>Enable MCP on startup</b> işaretli olsun ve <b>Start</b>’a basın.</li>' : ''}
-      </ol>`;
+    const deniyor = shDeniyor(d);
+    const hata = SH.hata || shSonDeneme(d);
+    govde = `<h2>Lisans kodu</h2>
+      <ol class="yap">
+        <li>AugeLab hesabınıza giriş yapın (Google, Microsoft ya da e-posta) ve lisans kodunu kopyalayın.
+          <div style="margin-top:8px"><button class="dug" data-is="hesap-ac">Lisans kodumu al ↗</button></div></li>
+        <li>Kodu buraya yapıştırın. İSG Kamera kodu yalnızca AugeLab Studio’ya verir; saklamaz.
+          <div class="sh-kod"><input id="sh-kod" autocomplete="off" spellcheck="false" placeholder="Lisans kodu" value="${h(SH.kod)}"${deniyor ? ' disabled' : ''}></div></li>
+      </ol>
+      ${deniyor ? '<div class="sh-bekle"><span class="sh-don"></span>Lisans kontrol ediliyor…</div>' : ''}
+      ${hata ? `<p class="hata">${h(hata)}</p>` : ''}
+      ${d.studio?.lisans_kaydedildi || deniyor ? '' : '<p class="soluk" style="font-size:13px">Studio bu bilgisayarda zaten etkinse kod girmeden <a href="#" id="sh-dene">lisansı kontrol edin</a>.</p>'}`;
+    eylem = `<button class="dug ana" id="sh-kaydet" type="button"${deniyor ? ' disabled' : ''}>Kaydet →</button>`;
   } else {
-    govde = '<h2>Hazır</h2><p>AugeLab Studio bağlı. Kameralarınızı ekleyip analizi başlatabilir ya da Ayarlar’dan örnek analizi çalıştırabilirsiniz.</p>';
+    govde = `<h2>Hazır</h2><p>AugeLab Studio ${h(d.studio?.surum || '')} arka planda çalışmaya hazır; penceresi açılmaz. Kameralarınızı ekleyip analizi başlatabilir ya da Ayarlar’dan örnek analizi çalıştırabilirsiniz.</p>`;
     eylem = '<button class="dug ana" data-is="sihirbaz-kapat">Bitir</button>';
   }
-  if (adim !== 2) SH.bagliBasi = 0;
+  const odak = document.activeElement?.id === 'sh-kod';
   $('#sh-govde').innerHTML = govde; $('#sh-eylem').innerHTML = eylem;
+  if (adim === 2) {
+    const girdi = $('#sh-kod');
+    girdi.oninput = () => { SH.kod = girdi.value; SH.hata = ''; };
+    girdi.onkeydown = e => { if (e.key === 'Enter') $('#sh-kaydet').click(); };
+    if (odak) { girdi.focus(); girdi.setSelectionRange(girdi.value.length, girdi.value.length); }
+    $('#sh-kaydet').onclick = shKaydet;
+    const dene = $('#sh-dene');
+    if (dene) dene.onclick = async e => { e.preventDefault(); SH.hata = ''; try { await api('/api/studio/dene', {}); } catch (x) { SH.hata = x.message; } await durumAl(); };
+  }
+  if (adim === 1) $('#sh-hesap-tamam').onclick = () => $('#sh-hesabim-var').click();
+  // Lisans kodu kurulum dosyasında girildiyse Studio bir kez kendiliğinden denenir (pencere açılmaz).
+  if (adim === 2 && d.studio?.lisans_kaydedildi && d.studio?.hazir !== true && !shDeniyor(d) && !SH.otoDeneme && d.is?.durum !== 'calisiyor') {
+    SH.otoDeneme = true;
+    api('/api/studio/dene', {}).then(durumAl).catch(x => { SH.hata = x.message; shCiz(); });
+  }
   shHesap(adim, d);
   $('#sh-sonra').style.visibility = adim === 3 ? 'hidden' : 'visible';
+}
+async function shKaydet() {
+  const kod = (SH.kod || '').trim();
+  if (!kod) { SH.hata = 'Lisans kodunu yapıştırın.'; shCiz(); return; }
+  SH.hata = '';
+  $('#sh-kaydet').disabled = true;
+  try {
+    await api('/api/studio/lisans', { kod });
+    SH.kod = '';  // kod sayfada da tutulmaz
+  } catch (x) {
+    SH.hata = x.message;
+  }
+  await durumAl();
 }
 function sihirbazAc() {
   SH.kapatildi = false;
@@ -189,7 +231,7 @@ function sihirbazAc() {
 }
 function sihirbazKapat() { $('#sihirbaz').close(); clearInterval(SH.zamanlayici); }
 function sihirbazIzle() {
-  // Studio birkaç yoklamada yanıt vermezse sihirbaz kendiliğinden açılır (tanıtım turu açıkken beklenir).
+  // Studio hazır değilse (kurulu değil, lisans girilmedi, deneme geçmedi) sihirbaz kendiliğinden açılır (tanıtım turu açıkken beklenir).
   const bagli = !!S.durum?.studio?.bagli;
   SH.cevrimdisi = bagli ? 0 : SH.cevrimdisi + 1;
   if (!bagli && SH.cevrimdisi >= 2 && !SH.kapatildi && !$('#sihirbaz').open && !document.getElementById('rehber')) sihirbazAc();
@@ -201,20 +243,32 @@ $('#sh-ust').onclick = () => { const tam = $('#sh-cerceve').classList.toggle('ta
 $('#sh-cerceve').addEventListener('mouseenter', () => setTimeout(() => $('#sh-kaydir').classList.add('gitti'), 4000));
 $('#sihirbaz').addEventListener('cancel', () => { SH.kapatildi = true; clearInterval(SH.zamanlayici); });
 
+let otoDenemeYapildi = false;
+function studioOtoDene(d) {
+  // Studio kurulu ama henüz denenmemişse (ör. lisans kodu kurulum dosyasında girildi) deneme bir kez kendiliğinden başlar.
+  if (otoDenemeYapildi || !d?.studio_kurulu || d?.studio?.kurulu === false || d?.studio?.hazir != null || d?.is?.durum === 'calisiyor') return;
+  otoDenemeYapildi = true;
+  api('/api/studio/dene', {}).then(durumAl).catch(() => { /* iş çalışıyor olabilir; sihirbazdan yeniden denenir */ });
+}
 function studioUyarisi() {
   // Studio bağlı değilken sayfanın üstünde kısa bir şerit: adımlar kurulum sihirbazında (yukarıda).
   const d = S.durum;
   if (d?.studio?.bagli) return '<div data-studio-kurulum hidden></div>';
   const kuruluyor = d?.is?.tur === 'studio-kurulum' && d?.is?.durum === 'calisiyor';
-  const baslik = kuruluyor ? 'AugeLab Studio kuruluyor' : d?.studio_kurulu ? 'AugeLab Studio bağlı değil' : 'AugeLab Studio kurulu değil';
-  return '<div data-studio-kurulum class="uyari-seridi"><b>' + baslik + '</b> Analiz için AugeLab Studio gerekir; kurulum sihirbazı adım adım ilerletir. '
+  const deniyor = d?.is?.tur === 'studio-dene' && d?.is?.durum === 'calisiyor';
+  if (deniyor || (d?.studio_kurulu && d?.studio?.hazir == null && !kuruluyor)) {
+    return '<div data-studio-kurulum class="uyari-seridi"><b>Lisans kontrol ediliyor</b> Lütfen bekleyin.</div>';
+  }
+  const baslik = kuruluyor ? 'AugeLab Studio kuruluyor' : d?.studio_kurulu ? 'Lisans bulunamadı' : 'AugeLab Studio kurulu değil';
+  const ek = d?.studio_kurulu && d?.studio?.hata ? h(d.studio.hata) + ' ' : 'Analiz için AugeLab Studio gerekir (arka planda çalışır, penceresi açılmaz); kurulum sihirbazı adım adım ilerletir. ';
+  return '<div data-studio-kurulum class="uyari-seridi"><b>' + baslik + '</b> ' + ek
     + '<button class="dug kucuk ana" data-is="sihirbaz-ac">Kurulum sihirbazı</button></div>';
 }
 function kilitUyarisi() {
   const k = S.durum?.model_kilidi;
   if (k?.community) {
-    if (k.durum === 'etkin') return '';
-    return '<div class="uyari-seridi" data-model-kilidi><b>Studio lisansı</b> '
+    if (k.durum === 'studio_kosusunda_dogrulanir') return '';
+    return '<div class="uyari-seridi" data-model-kilidi><b>Model paketi</b> '
       + h(k.mesaj || 'Yerel Studio lisansı okunamadı.') + '</div>';
   }
   if (k?.lisansli) {
@@ -446,7 +500,7 @@ async function sayfaAyarlar() {
       <button class="dug kucuk" data-is="is" data-tur="test" data-kod="${h(k.kod)}">Bağlantıyı dene</button>
       ${k.tur === 'dosya' ? `<button class="dug kucuk ana" data-is="is" data-tur="video" data-kod="${h(k.kod)}">Videoyu analiz et</button>` : `<button class="dug kucuk ana" data-is="is" data-tur="izle" data-kod="${h(k.kod)}">İzlemeyi başlat</button>`}
       <a class="dug kucuk" href="#/kamera/${h(k.kod)}">Düzenle</a><button class="dug kucuk tehlike" data-is="kamera-sil" data-kod="${h(k.kod)}" data-ad="${h(k.ad)}">Sil</button></td></tr>`;
-  $('#sayfa').innerHTML = ust('Ayarlar', `İSG Kamera ${h(d.surum)} · AugeLab Studio ${d.studio?.bagli ? h(d.studio.surum || '') + ' bağlı' : 'bağlı değil'} · her şey bu bilgisayarda çalışır`, '<a class="dug" href="https://account.augelab.com/purchase" target="_blank" rel="noopener noreferrer">Planları incele</a><button class="dug" data-is="klasor">Veri klasörü</button><button class="dug tehlike" data-is="kapat">Programı kapat</button>')
+  $('#sayfa').innerHTML = ust('Ayarlar', `İSG Kamera ${h(d.surum)} · AugeLab Studio ${d.studio?.bagli ? h(d.studio.surum || '') + ' hazır (arka planda)' : 'hazır değil'} · her şey bu bilgisayarda çalışır`, '<a class="dug" href="https://account.augelab.com/purchase" target="_blank" rel="noopener noreferrer">Planları incele</a><button class="dug" data-is="klasor">Veri klasörü</button><button class="dug tehlike" data-is="kapat">Programı kapat</button>')
     + modelUyarisi()
     + `<div class="izgara iki"><div class="kart" id="a-kameralar"><div style="display:flex;align-items:center;margin-bottom:8px"><div class="et" style="flex:1">Kameralar</div>
         ${d.ornek_var ? '<button class="dug kucuk" data-is="ornek">Örnek analizi çalıştır</button> ' : ''}<a class="dug kucuk ana" href="#/kamera/yeni" style="margin-left:6px">Kamera ekle</a></div>
@@ -491,7 +545,7 @@ function baglantiOzeti(b) {
     opcua: `${b.adres} · ${b.dugum}`, eposta: `${b.sunucu} → ${(b.alicilar || []).join(', ')}` }[b.tur] || '';
   const suzgec = [b.en_az_puan ? `risk ≥ ${b.en_az_puan}` : '', b.yalniz_ciddi ? 'yalnız ciddi risk' : '', (b.kategoriler || []).length ? b.kategoriler.map(k => S.katalog.kategoriler[k] || k).join(', ') : '',
     (b.kameralar || []).length ? `${b.kameralar.length} kamera` : ''].filter(Boolean).join(' · ');
-  return (b.studio ? 'Studio bloğuyla · ' : '') + hedef + (b.studio ? '' : (suzgec ? ' · ' + suzgec : ' · bütün olaylar'));
+  return (b.tur === 's7' ? 'desteklenmiyor · ' : '') + hedef + (suzgec ? ' · ' + suzgec : ' · bütün olaylar');
 }
 function baglantiPenceresi(i, tur) {
   const eski = i >= 0 ? S.durum.genel.baglantilar[i] : null;
@@ -512,9 +566,7 @@ function baglantiPenceresi(i, tur) {
       <div><label>&nbsp;</label><label class="cip" style="cursor:pointer;margin:0"><input type="checkbox" data-b-kutu="acik" ${b.acik !== false ? 'checked' : ''}> Açık</label></div></div>
     <label>Kategoriler (hiçbiri seçilmezse hepsi)</label>${isaretler('kategoriler', Object.entries(S.katalog.kategoriler))}
     <label>Kameralar (hiçbiri seçilmezse hepsi)</label>${isaretler('kameralar', S.durum.kameralar.map(k => [k.kod, k.ad])) || '<span class="not">Kamera yok.</span>'}
-    ${['modbus', 'mqtt', 'opcua'].includes(b.tur) ? `<label class="cip" style="cursor:pointer;margin:12px 0 0;display:inline-flex;color:var(--yazi)"><input type="checkbox" data-b-kutu="studio" ${b.studio ? 'checked' : ''}> AugeLab Studio bloğuyla gönder</label>
-      <p class="not">İşaretliyse çıkış panelden değil, kameranın Studio sahnesine eklenen ${{ modbus: 'Modbus Write', mqtt: 'MQTT Publish', opcua: 'OPC UA Write' }[b.tur]} bloğundan gider: ${{ modbus: 'bobine Alarm (yazmaçta Risk 0-25) yazılır; alarm sürdükçe 1, bitince 0', mqtt: 'başlayan her olay JSON olarak yayımlanır', opcua: 'düğüme Risk (0-25) yazılır; 0 = alarm yok' }[b.tur]}. Risk puanı ve kategori süzgeçleri bu yolda uygulanmaz (Alarm, önemi 4 ve üstü olaylarda açılır); kullanıcı adı ve şifre aktarılmaz. Sahne bir sonraki çalıştırmada yeniden kurulur.</p>` : ''}
-    ${b.tur === 's7' ? '<p class="not">Siemens S7 çıkışı yalnızca Studio sahnesindeki Siemens S7 Write bloğuyla çalışır: seçilen DB bitine Alarm yazılır. Bu bağlantı bir PLC ya da benzeticiyle denenmedi.</p>' : ''}
+    ${b.tur === 's7' ? '<p class="not">Siemens S7 çıkışı bu sürümde desteklenmiyor (AugeLab Studio arka planda, hazır sahneyle çalışır); bu bağlantı kullanılmaz.</p>' : ''}
     ${b.tur === 'modbus' || b.tur === 'opcua' || b.tur === 's7' ? '<p class="not">Emniyet durdurması yerine kullanmayın.</p>' : ''}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="dug" data-is="katman-kapat">Vazgeç</button><button class="dug" data-is="baglanti-dene" data-i="form">Deneme iletisi gönder</button>
       <button class="dug ana" data-is="baglanti-kaydet" data-i="${i}">Kaydet</button></div></div></div>`;
@@ -846,6 +898,7 @@ async function durumuYenile() {
   S.durum = await api('/api/durum');
   rayCiz();
   lisansUyarisi(S.durum.studio);
+  studioOtoDene(S.durum);
   document.querySelectorAll('[data-studio-kurulum]').forEach(e => { e.outerHTML = studioUyarisi(); });
   sihirbazIzle();
 }

@@ -1,16 +1,22 @@
-"""AugeLab Studio köprüsü: Studio'nun yerel MCP adresi üzerinden.
+"""AugeLab Studio köprüsü: arayüzsüz koşu.
 
-İSG Kamera, Studio'nun kodunu içermez. Kullanıcının kurup açtığı Studio'ya, Studio'nun herkese açık MCP araçlarıyla
-(node.custom.create, graph.program, scene.run.start, ...) bağlanır. İlk kullanımda kendi bloklarını kaydeder
-(studio_blok.py), motorunu Studio'nun özel blok klasörünün yanına koyar ve her kamera için bir sahne kurar:
+İSG Kamera, Studio'nun kodunu içermez ve Studio penceresini hiç açmaz. Kullanıcının kurduğu Studio'nun kendi Python'uyla
+her kamera için gizli bir süreç başlatır:
+
+    "<Studio>/Python/python.exe" -m studio run isg-kamera.pmod --json
+
+isg-kamera.pmod, programla gelen hazır sahnedir (Studio sahne dosyalarını şifreli kaydettiği için bir kez Studio'da kurulup
+kaydedilmiştir: kurulum/sablon.py):
 
     İSG Kamera Kodu ─────────────────────┬──────────────────┐
-    İSG Video / Camera IP ┬► İSG Algılama ─► İSG İskelet ─► İSG Kurallar ─► işaretli görüntü, Alarm, Risk, Olaylar
-                       └────────────────────► (görüntü)          (Alarm → Modbus / S7 / OPC UA / MQTT blokları)
+    İSG Video ┬► İSG Algılama ─► İSG İskelet ─► İSG Kurallar ─► olaylar, klipler, ölçümler (panelin kuyruğuna)
+              └────────────────────────────────► (görüntü, zaman, bitti)
 
-Sahne Studio'da canlı çalışır; olaylar ve klipler panelin veri klasörüne (kuyruk/) düşer.
+Sahne her kamera için aynıdır; hangi kamerayı işleyeceğini ortam değişkenlerinden öğrenir (isg_motor.blok: ISG_KAMERA
+"kod#koşu", ISG_KAMERA_ADRES canlı akış adresi, ISG_DUR durdurma dosyası). Panel önce bloklarını Studio'nun özel blok
+klasörüne yazar ve motorunu (isg_motor, modeller, onnxruntime) yanına koyar; Studio'nun ortamına paket kurulmaz.
 
-Geliştirme için:  python studio.py durum | kur <kamera> | calistir <kamera> [saniye] | durdur <kamera>
+Geliştirme için:  python studio.py durum | dene | calistir <kamera> [saniye]
 """
 from __future__ import annotations
 
@@ -18,25 +24,25 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import secrets
 import shutil
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any
 
 import studio_blok
 import yollar
 
-VARSAYILAN_ADRES = "http://127.0.0.1:8765/mcp"
-OP_METIN = "119"       # String Input
-OP_VIDEO = "203"       # Video
-OP_KAMERA_IP = "2024"  # Camera IP
-OP_KAMERA_USB = "202"  # Camera USB
-KOD_BASLIGI = "İSG Kamera Kodu"
-MOTOR_KAYNAK = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "motor"
+KAYNAK = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+MOTOR_KAYNAK = KAYNAK / "motor"
+SABLON_KAYNAK = KAYNAK / "kurulum" / "sahne" / "isg-kamera.pmod"
 DURUM_DOSYASI = yollar.VERI / "studio.json"
+LISANS_ISARETI = yollar.VERI / "studio-lisans.txt"  # kurulum dosyası lisans kodunu Studio'ya kaydedince bırakır (kodun kendisi değil)
+KOSU_KLASORU = yollar.VERI / "studio"
+PENCERESIZ = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+CANLI_TURLER = ("rtsp", "onvif", "http")
 
 
 class StudioHatasi(RuntimeError):
@@ -44,78 +50,43 @@ class StudioHatasi(RuntimeError):
 
 
 class StudioYok(StudioHatasi):
-    """Studio açık değil ya da MCP sunucusu kapalı: beklenebilir, hata değil."""
+    """AugeLab Studio kurulu değil: beklenebilir, hata değil."""
 
 
-def _anahtar() -> str:
-    return "isg-" + secrets.token_hex(12)
+# ---------------------------------------------------------------- Studio'nun yerleri
 
 
-def _tirnak(deger: str) -> str:
-    return "'" + str(deger).replace("\\", "/").replace("'", "\\'") + "'"
+def kurulu_klasor() -> Path | None:
+    import studio_kurulum
+
+    exe = studio_kurulum.kurulu_studio()
+    return exe.parent if exe else None
 
 
-async def cagir(arac: str, arg: dict[str, Any], adres: str = VARSAYILAN_ADRES) -> dict[str, Any]:
-    """Bir Studio aracını çağırır. Değiştiren çağrılar idempotencyKey taşıdığı için yeniden denemek güvenlidir."""
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
-
-    son: Exception | None = None
-    for deneme in range(4):
-        try:
-            async with streamable_http_client(adres) as (oku, yaz, *_):
-                async with ClientSession(oku, yaz) as oturum:
-                    await oturum.initialize()
-                    sonuc = await oturum.call_tool(arac, arg)
-            break
-        except Exception as e:  # bağlantı reddi, zaman aşımı, protokol hatası
-            son = e
-            if deneme < 3:
-                await asyncio.sleep(1 + deneme)
-    else:
-        raise StudioYok(f"AugeLab Studio'ya bağlanılamadı ({adres}). Studio açık mı, MCP etkin mi?") from son
-    yuk = getattr(sonuc, "structuredContent", None) or getattr(sonuc, "structured_content", None)
-    if not yuk and sonuc.content:
-        try:
-            yuk = json.loads(getattr(sonuc.content[0], "text", "") or "{}")
-        except ValueError:
-            yuk = {}
-    yuk = yuk or {}
-    if getattr(sonuc, "isError", False) or getattr(sonuc, "is_error", False) or yuk.get("error"):
-        hata = yuk.get("error") or {}
-        raise StudioHatasi(f"{arac}: {hata.get('code', 'HATA')} {hata.get('message', '')}".strip())
-    veri = dict(yuk.get("data") or {})
-    if yuk.get("operation") and "operation" not in veri:  # uzun işler "kabul edildi" yanıtını verinin yanında döndürür
-        veri["operation"] = yuk["operation"]
-    return veri
+def studio_python() -> Path:
+    """Studio'nun kendi Python yorumlayıcısı (arayüzsüz koşu bununla yapılır)."""
+    klasor = kurulu_klasor()
+    if klasor is None:
+        raise StudioYok("AugeLab Studio kurulu değil. Kurulum sihirbazıyla kurun.")
+    py = klasor / "Python" / "python.exe"
+    if not py.is_file():
+        raise StudioHatasi(f"AugeLab Studio'nun Python'u bulunamadı ({py}). Studio'yu resmî kurucuyla onarın.")
+    return py
 
 
-async def bekle(veri: dict[str, Any], sinir_sn: float) -> dict[str, Any]:
-    """Kabul edilen bir işi kısa sunucu beklemeleriyle sonuna kadar izler."""
-    is_ = veri.get("operation") or veri
-    bas = time.monotonic()
-    while is_.get("state") in ("queued", "running") and time.monotonic() - bas < sinir_sn:
-        dahasi = await cagir("operation.get", {"operationId": is_["id"], "waitTimeoutMs": 15000, "updateLimit": 1})
-        is_ = dahasi.get("operation") or dahasi
-    return is_
+def marketplace() -> Path:
+    """Studio'nun özel blok klasörünün bulunduğu yer (Studio bunu her kullanıcı için %APPDATA% altında tutar)."""
+    return Path(os.environ.get("APPDATA", str(Path.home()))) / "AugeLab Studio" / "marketplace"
 
 
-async def durum() -> dict[str, Any]:
-    v = await cagir("studio.status.get", {})
-    lisans = v.get("license")
-    community_siniri = None
-    if isinstance(lisans, dict):
-        plan = lisans.get("tier")
-        suresi_doldu = lisans.get("expired")
-        fps_siniri = lisans.get("fpsLimitActive")
-        if isinstance(plan, str) and isinstance(suresi_doldu, bool) and isinstance(fps_siniri, bool):
-            community_siniri = plan.casefold() == "community" and suresi_doldu and fps_siniri
-    return {
-        "surum": v.get("studioVersion"),
-        "mcp": (v.get("mcp") or {}).get("state"),
-        "motor_calisiyor": v.get("engineRunning"),
-        "community_fps_siniri": community_siniri,
-    }
+def surum() -> str | None:
+    """Kurulu Studio'nun sürümü (paket bilgisinden; Studio çalıştırılmaz)."""
+    klasor = kurulu_klasor()
+    if klasor is None:
+        return None
+    for bilgi in sorted((klasor / "Python" / "Lib" / "site-packages").glob("studio-*.dist-info")):
+        return bilgi.name[len("studio-"):-len(".dist-info")]
+    return None
 
 
 # ---------------------------------------------------------------- motor klasörü
@@ -169,7 +140,7 @@ def _esitle(kaynak: Path, hedef: Path) -> int:
             except OSError:
                 pass
             raise StudioHatasi(f"Motor dosyası güncellenemedi ({goreli.as_posix()}): dosya kullanımda olabilir. "
-                               "AugeLab Studio'yu kapatıp yeniden açın, sonra tekrar deneyin.") from None
+                               "Süren analizleri durdurup tekrar deneyin.") from None
         kopya += 1
     for h in _dosyalar(hedef):
         if h.relative_to(hedef) not in kaynaklar:
@@ -204,20 +175,162 @@ def motoru_yerlestir(hedef: Path) -> Path:
     return hedef
 
 
-async def bloklari_kur() -> Path:
-    """İSG bloklarını Studio'ya kaydeder (ya da yeniler) ve motoru yerleştirir. Dönüş: motor klasörü."""
-    veri = await cagir("node.custom.create", {"specifications": studio_blok.TANIMLAR, "replaceExisting": True, "idempotencyKey": _anahtar()})
-    is_ = await bekle(veri, 120)
-    if is_.get("state") != "succeeded":
-        hata = is_.get("error") or {}
-        raise StudioHatasi(f"İSG blokları Studio'ya eklenemedi: {hata.get('message') or is_.get('state')}")
-    dosyalar = [n.get("file_path") for n in (is_.get("result") or {}).get("nodes", []) if n.get("file_path")]
-    if not dosyalar:
-        raise StudioHatasi("Studio, blokların nereye kaydedildiğini bildirmedi.")
-    return motoru_yerlestir(Path(dosyalar[0]).parent.parent / studio_blok.MOTOR_KLASORU)
+def bloklari_kur() -> Path:
+    """İSG bloklarını Studio'nun özel blok klasörüne yazar (yalnızca değiştiyse) ve motoru yanına yerleştirir.
+    Dosyalar Studio'nun node.custom.create ile ürettiklerinin aynısıdır (studio_blok.dosya_metni). Dönüş: motor klasörü."""
+    bloklar = marketplace() / "custom_blocks"
+    bloklar.mkdir(parents=True, exist_ok=True)
+    for tanim in studio_blok.TANIMLAR:
+        hedef = bloklar / f"{tanim['opCode']}.py"
+        metin = studio_blok.dosya_metni(tanim).replace("\n", "\r\n").encode("utf-8")
+        try:
+            if hedef.is_file() and hedef.read_bytes() == metin:
+                continue
+        except OSError:
+            pass
+        gecici = hedef.with_name(hedef.name + ".yeni")
+        gecici.write_bytes(metin)
+        os.replace(gecici, hedef)
+    return motoru_yerlestir(marketplace() / studio_blok.MOTOR_KLASORU)
 
 
-# ---------------------------------------------------------------- sahne
+def sablon() -> Path:
+    """Hazır sahnenin veri klasöründeki kopyası (exe her açılışta dosyalarını başka bir geçici klasöre açar)."""
+    if not SABLON_KAYNAK.is_file():
+        raise StudioHatasi(f"Hazır İSG sahnesi bulunamadı: {SABLON_KAYNAK}")
+    KOSU_KLASORU.mkdir(parents=True, exist_ok=True)
+    hedef = KOSU_KLASORU / SABLON_KAYNAK.name
+    if not hedef.is_file() or _dosya_ozeti(hedef) != _dosya_ozeti(SABLON_KAYNAK):
+        shutil.copyfile(SABLON_KAYNAK, hedef)
+    return hedef
+
+
+# ---------------------------------------------------------------- arayüzsüz koşular
+
+
+class Kosu:
+    """Bir kameranın gizli `studio run` süreci."""
+
+    def __init__(self, kod: str, kosu: str, surec: subprocess.Popen, dur: Path, gunluk: Path):
+        self.kod, self.kosu, self.surec, self.dur, self.gunluk = kod, kosu, surec, dur, gunluk
+        self.durum = "başlıyor"
+        self.sonuc: dict | None = None
+        self._okundu = threading.Event()
+        threading.Thread(target=self._oku, name=f"studio-{kod}", daemon=True).start()
+
+    def _oku(self) -> None:
+        """Studio'nun --json olaylarını okur (lifecycle / result)."""
+        try:
+            for satir in self.surec.stdout:
+                try:
+                    olay = json.loads(satir)
+                except ValueError:
+                    # With no local license Studio's console prompt can precede
+                    # the JSON result on the same line, even with stdin closed.
+                    bas = satir.find('{"type":')
+                    if bas < 0:
+                        continue
+                    try:
+                        olay = json.loads(satir[bas:])
+                    except ValueError:
+                        continue
+                if not isinstance(olay, dict):
+                    continue
+                if olay.get("type") == "lifecycle":
+                    self.durum = olay.get("state") or self.durum
+                elif olay.get("type") == "result":
+                    self.sonuc = olay
+        finally:
+            self._okundu.set()
+
+    def calisiyor(self) -> bool:
+        return self.surec.poll() is None
+
+    def sorun(self) -> str | None:
+        """Süreç kendiliğinden bittiyse nedeni (lisans, eksik blok, çökme...), sürüyorsa None."""
+        if self.calisiyor():
+            return None
+        self._okundu.wait(2)
+        r = self.sonuc or {}
+        if r.get("success"):
+            return None
+        neden = r.get("error") or r.get("failure_type") or f"çıkış kodu {self.surec.returncode}"
+        return (f"AugeLab Studio sahneyi çalıştıramadı ({neden}). Studio lisansınızı kurulum sihirbazından kontrol edin; "
+                f"ayrıntı: {self.gunluk}")
+
+    def bitir(self, bekle_sn: float = 3.0) -> None:
+        """Önce akışı bitirir (açık olaylar kapanış kaydı bırakır), sonra süreci kapatır."""
+        try:
+            self.dur.touch()
+        except OSError:
+            pass
+        son = time.monotonic() + bekle_sn
+        while self.calisiyor() and time.monotonic() < son:
+            time.sleep(0.2)
+        if self.calisiyor():
+            # Studio sürekli çalışma kipinde kendiliğinden bitmez: süreç ağacı (denetleyici ve işçi) kapatılır
+            subprocess.run(["taskkill", "/PID", str(self.surec.pid), "/T", "/F"], capture_output=True, creationflags=PENCERESIZ)
+            try:
+                self.surec.wait(10)
+            except subprocess.TimeoutExpired:
+                self.surec.kill()
+        try:
+            self.dur.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+KOSULAR: dict[str, Kosu] = {}
+_KILIT = threading.Lock()
+
+
+def baslat(kod: str, kosu: str, adres: str = "", canli: bool = False, adim: int | None = None, ek_ortam: dict | None = None) -> Kosu:
+    """Kameranın sahnesini arayüzsüz başlatır. `canli`: süreç çökerse Studio onu yeniden başlatır."""
+    py = studio_python()
+    sahne = sablon()
+    bloklari_kur()
+    with _KILIT:
+        eski = KOSULAR.pop(kod, None)
+    if eski is not None:
+        eski.bitir(0)
+    KOSU_KLASORU.mkdir(parents=True, exist_ok=True)
+    dur = KOSU_KLASORU / f"{kod}.dur"
+    dur.unlink(missing_ok=True)
+    gunluk = KOSU_KLASORU / f"{kod}.log"
+    ortam = {k: v for k, v in os.environ.items() if not k.startswith(("ISG_", "PYTHON", "_MEI", "TCL_", "TK_"))}
+    ortam.update(ISG_KAMERA=f"{kod}#{kosu}", ISG_DUR=str(dur), PYTHONIOENCODING="utf-8")
+    if adres:
+        ortam["ISG_KAMERA_ADRES"] = adres  # şifre içerebilir: yalnızca sürecin ortamında, dosyaya yazılmaz
+    ortam.update(ek_ortam or {})
+    komut = [str(py), "-m", "studio", "run", str(sahne), "--json", "--verbosity", "30"]
+    if canli:
+        komut += ["--on-fail", "restart", "--max-restarts", "1000", "--restart-delay", "5"]
+    if adim:
+        komut += ["--step", str(int(adim))]
+    import studio_kurulum
+
+    with gunluk.open("ab") as g, studio_kurulum._temiz_dll_dizini():  # Studio, paketlenmiş Python'un DLL dizinini devralmasın
+        surec = subprocess.Popen(komut, cwd=str(KOSU_KLASORU), env=ortam, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=g, text=True, encoding="utf-8", errors="replace", creationflags=PENCERESIZ)
+    k = Kosu(kod, kosu, surec, dur, gunluk)
+    with _KILIT:
+        KOSULAR[kod] = k
+    return k
+
+
+def durdur_hepsi() -> None:
+    """Program kapanırken: süren bütün koşuları bitirir."""
+    with _KILIT:
+        kosular = list(KOSULAR.values())
+        KOSULAR.clear()
+    for k in kosular:
+        k.bitir()
+
+
+# ---------------------------------------------------------------- durum ve deneme
+
+
+KONTROL_SURUMU = 2  # lisans kontrolü modelleri de açar; eski sürümlerin "hazır" kaydı geçersiz sayılır
 
 
 def _kayitli() -> dict:
@@ -227,218 +340,153 @@ def _kayitli() -> dict:
         return {}
 
 
-def _kaydet(kod: str, sahne: str | None, tur: str = "") -> None:
+def kaydet(**degerler) -> None:
     d = _kayitli()
-    if sahne is None:
-        d.pop(kod, None)
-    else:
-        d[kod] = {"sahne": sahne, "blok": studio_blok.imza(), "cikis": cikis_imzasi(kod), "tur": tur}
+    d.update(degerler)
     DURUM_DOSYASI.parent.mkdir(parents=True, exist_ok=True)
     DURUM_DOSYASI.write_text(json.dumps(d), encoding="utf-8")
 
 
-KURAL_CIKIS = {"alarm": 1, "risk": 2, "olaylar": 3, "yeni": 5, "yaz": 6}  # İSG Kurallar bloğunun çıkış sıraları
-OP_MODBUS_BAGLAN, OP_MODBUS_YAZ = "435", "437"
-OP_MQTT_YAYIMLA = "4332"
-OP_OPCUA_ISTEMCI, OP_OPCUA_YAZ = "412", "414"
-OP_S7_BAGLAN, OP_S7_YAZ = "429", "4312"
-KAMERA_BASLIGI = "İSG Kamera"
-
-
-def studio_cikislari(kod: str) -> list[dict]:
-    """Bu kameranın sahnesine Studio bloğu olarak eklenecek çıkışlar (Ayarlar → Çıkışlar'da "Studio bloğuyla" işaretli olanlar)."""
-    import depo
-
-    return [c for c in depo.genel().get("baglantilar") or []
-            if c.get("studio") and c.get("acik", True) and c.get("tur") in ("modbus", "mqtt", "opcua", "s7")
-            and (not c.get("kameralar") or kod in c["kameralar"])]
-
-
-def cikis_imzasi(kod: str) -> str:
-    import hashlib
-
-    return hashlib.sha1(json.dumps(studio_cikislari(kod), sort_keys=True).encode("utf-8")).hexdigest()[:12]
-
-
-def sahne_kaynagi(kod: str, tur: str, cikislar: list[dict] | None = None) -> str:
-    if tur == "usb":
-        raise StudioHatasi("USB kamera Studio sahnesine henüz bağlanmıyor (Camera USB bloğunun kamerası Studio'da elle seçilir).")
-    dosya = tur == "dosya"
-    satirlar = [
-        f"kod = node('{OP_METIN}', title='{KOD_BASLIGI}')",
-        f"kaynak = node('{studio_blok.VIDEO_OP}', title='{studio_blok.VIDEO_BASLIK}')" if dosya else f"kaynak = node('{OP_KAMERA_IP}', title='{KAMERA_BASLIGI}')",
-        f"algi = node('{studio_blok.ALGILA_OP}', title='{studio_blok.ALGILA_BASLIK}')",
-        f"iskelet = node('{studio_blok.ISKELET_OP}', title='{studio_blok.ISKELET_BASLIK}')",
-        f"kural = node('{studio_blok.KURALLAR_OP}', title='{studio_blok.KURALLAR_BASLIK}')",
-        f"kod.params['threshold'] = {_tirnak(kod)}",
-        "connect(kaynak.out[0], algi.in_[0])",
-        "connect(kod.out[0], algi.in_[1])",
-        "connect(kaynak.out[0], kural.in_[0])",
-        "connect(kaynak.out[0], iskelet.in_[0])",
-        "connect(algi.out[0], iskelet.in_[1])",
-        "connect(iskelet.out[0], kural.in_[1])",
-        "connect(kod.out[0], kural.in_[2])",
-    ]
-    if dosya:
-        satirlar += ["connect(kod.out[0], kaynak.in_[0])", "connect(kaynak.out[1], kural.in_[3])", "connect(kaynak.out[2], kural.in_[4])"]
-    C = KURAL_CIKIS
-    for i, c in enumerate(cikislar or []):
-        ad = _tirnak(f"İSG çıkış · {c.get('ad') or c['tur']}"[:60])
-        if c["tur"] == "modbus":
-            yazmac = c.get("hedef") == "yazmac"
-            satirlar += [
-                f"mb{i} = node('{OP_MODBUS_BAGLAN}')", f"mb{i}.params['Ip Address'] = {_tirnak(c['sunucu'])}", f"mb{i}.params['TCP Port'] = {_tirnak(c.get('port') or 502)}",
-                f"my{i} = node('{OP_MODBUS_YAZ}', title={ad})", f"my{i}.params['Address'] = {_tirnak(c.get('adres') or 0)}",
-                f"my{i}.params['Data Type'] = {_tirnak('Holding Register' if yazmac else 'Coil')}",
-                f"connect(kural.out[{C['yaz']}], my{i}.in_[0])", f"connect(mb{i}.out[0], my{i}.in_[1])",
-                f"connect(kural.out[{C['risk'] if yazmac else C['alarm']}], my{i}.in_[2])",  # bobine Alarm, yazmaca Risk (0-25) yazılır
-            ]
-        elif c["tur"] == "mqtt":
-            satirlar += [
-                f"mq{i} = node('{OP_MQTT_YAYIMLA}', title={ad})", f"mq{i}.params['Address'] = {_tirnak(c['sunucu'])}", f"mq{i}.params['Port'] = {_tirnak(c.get('port') or 1883)}",
-                f"mq{i}.params['Topic'] = {_tirnak(c.get('konu') or 'isg/olay')}",  # QoS bloğun varsayılanında (0) kalır: ayar adı tek başına çözülmüyor
-                f"connect(kural.out[{C['yeni']}], mq{i}.in_[0])", f"connect(kural.out[{C['olaylar']}], mq{i}.in_[1])",  # yalnızca olay başladığı karede yayımlanır
-            ]
-        elif c["tur"] == "opcua":
-            satirlar += [
-                # OPC UA Client bloğu adresi "IP:port" biçiminde ister (opc.tcp:// ve yol olmadan)
-                f"oi{i} = node('{OP_OPCUA_ISTEMCI}')", f"oi{i}.params['le1'] = {_tirnak(re.sub(r'^opc\.tcp://', '', c['adres']).split('/')[0])}",
-                f"od{i} = node('{OP_METIN}', title={_tirnak(('OPC UA düğümü · ' + (c.get('ad') or ''))[:60])})", f"od{i}.params['threshold'] = {_tirnak(c['dugum'])}",
-                f"oy{i} = node('{OP_OPCUA_YAZ}', title={ad})", f"oy{i}.params['pshbttn1'] = {_tirnak(c.get('tip') or 'Float')}",
-                f"connect(oi{i}.out[0], oy{i}.in_[0])", f"connect(od{i}.out[0], oy{i}.in_[1])", f"connect(kural.out[{C['risk']}], oy{i}.in_[2])",  # düğüme Risk (0-25, ondalık) yazılır
-            ]
-        elif c["tur"] == "s7":
-            satirlar += [
-                f"sb{i} = node('{OP_S7_BAGLAN}')", f"sb{i}.params['Ip Address'] = {_tirnak(c['sunucu'])}", f"sb{i}.params['Rack Address'] = {_tirnak(c.get('raf') or 0)}",
-                f"sb{i}.params['Slot'] = {_tirnak(c.get('yuva') or 1)}", f"sb{i}.params['TCP Port'] = {_tirnak(c.get('port') or 102)}",
-                f"sy{i} = node('{OP_S7_YAZ}', title={ad})", f"sy{i}.params['Db Number'] = {_tirnak(c.get('db') or 1)}", f"sy{i}.params['Byte Address'] = {_tirnak(c.get('bayt') or 0)}",
-                f"sy{i}.params['Bit Position:'] = {_tirnak(c.get('bit') or 0)}", f"sy{i}.params['Data Type'] = 'Boolean'",
-                f"connect(kural.out[{C['yaz']}], sy{i}.in_[0])", f"connect(kural.out[{C['alarm']}], sy{i}.in_[1])", f"connect(sb{i}.out[0], sy{i}.in_[3])",
-            ]
-    return "\n".join(satirlar) + "\n"
-
-
-async def sahneyi_oku(sahne: str) -> dict | None:
-    """Sahnedeki İSG bloklarını başlıklarından bulur. Sahne yoksa ya da bizim değilse None."""
+def _deneme_kosusu(sinir_sn: float, ek_ortam: dict | None = None) -> tuple["Kosu", str | None, dict]:
+    """Deneme sahnesini kısa bir koşuyla çalıştırır: motor modelleri açıp bir kare işler, sonucu bir dosyaya yazar.
+    Dönüş: (koşu, sorun ya da None, motorun sonucu)."""
+    KOSU_KLASORU.mkdir(parents=True, exist_ok=True)
+    sonuc_yolu = KOSU_KLASORU / "deneme-sonuc.json"
+    sonuc_yolu.unlink(missing_ok=True)
+    k = baslat("_deneme", secrets.token_hex(4), adim=3, ek_ortam={"ISG_DENEME_SONUC": str(sonuc_yolu), **(ek_ortam or {})})
     try:
-        g = await cagir("graph.read", {"sceneId": sahne, "view": "graph"})
-    except StudioHatasi:
-        return None
-    satirlar = re.findall(r'^ (n\w+):"([^"]*)" @(\S+)(?: title="([^"]*)")?', g.get("graph", ""), flags=re.M)
-    hedefler = g.get("navigationTargets") or [{}]
-    ham = dict(zip((s[0] for s in satirlar), hedefler[0].get("nodeIds", [])))
-    basliga = {s[3] or s[1]: s[0] for s in satirlar}
-    opa = {s[2]: s[0] for s in satirlar}
-    if KOD_BASLIGI not in basliga or studio_blok.KURALLAR_BASLIK not in basliga or OP_VIDEO in opa:
-        return None  # yok, bizim değil ya da eski düzen (Studio'nun Video bloğuyla kurulmuş)
-    return {"sahne": sahne, "sahne_ham": hedefler[0].get("sceneId"), "revizyon": g.get("revision"), "dugumler": basliga, "ham": ham, "op": opa, "metin": g.get("graph", "")}
+        k.surec.wait(sinir_sn)
+    except subprocess.TimeoutExpired:
+        k.bitir(0)
+        raise StudioHatasi("AugeLab Studio deneme sahnesini zamanında bitirmedi.") from None
+    finally:
+        with _KILIT:
+            KOSULAR.pop("_deneme", None)
+    sorun, model = k.sorun(), {}
+    if not sorun:
+        try:
+            model = json.loads(sonuc_yolu.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            model = {"ok": False, "hata": "motor sonuç bırakmadı (İSG blokları Studio'da çalışmadı)"}
+        if not model.get("ok"):
+            hata = str(model.get("hata") or "bilinmiyor")
+            sorun = ("Lisans kodunu kurulum sihirbazından girin." if hata.startswith("lisans") else f"Modeller açılamadı ({hata}).")
+    return k, sorun, model
+
+
+def yuzleri_gizle(adres: str, cikti: Path, sinir_sn: float = 240.0) -> int:
+    """Panelin `adres`ten (127.0.0.1, tek seferlik) verdiği karedeki yüzleri Studio'da gizleyip `cikti`ya yazar; şifreli
+    modeller panelde açılmaz. Dönüş: gizlenen bölge sayısı."""
+    cikti.unlink(missing_ok=True)
+    _, sorun, model = _deneme_kosusu(sinir_sn, {"ISG_YUZ_KARE": adres, "ISG_YUZ_CIKTI": str(cikti)})
+    if sorun:
+        raise StudioHatasi(sorun)
+    if not cikti.is_file():
+        raise StudioHatasi("Yüzler gizlenemedi.")
+    return int(model.get("yuz") or 0)
+
+
+def dene(sinir_sn: float = 240.0) -> dict:
+    """Studio'nun arayüzsüz çalışabildiğini (kurulu, bloklar yükleniyor) ve modellerin açıldığını (şifreli paketlerde
+    Studio lisansı dahil) kısa bir koşuyla dener: motor siyah bir kareyle modelleri çalıştırıp sonucu bir dosyaya yazar."""
+    k, sorun, _ = _deneme_kosusu(sinir_sn)
+    if sorun:
+        kaydet(hazir=False, denendi=time.time(), hata=sorun[:300], kontrol=KONTROL_SURUMU)
+        raise StudioHatasi(sorun)
+    kaydet(hazir=True, denendi=time.time(), surum=surum(), hata=None, kontrol=KONTROL_SURUMU)
+    return {"hazir": True, "sure_sn": round(((k.sonuc or {}).get("duration_ms") or 0) / 1000, 1)}
+
+
+async def durum() -> dict:
+    """Panelin gösterdiği Studio durumu. Studio'ya bağlanılmaz; kurulu mu, sahne denendi mi, koşan kamera var mı."""
+    if kurulu_klasor() is None:
+        raise StudioYok("AugeLab Studio kurulu değil.")
+    studio_python()
+    k = _kayitli()
+    hazir = k.get("hazir") if k.get("kontrol") == KONTROL_SURUMU else None  # eski kayıt: yeniden kontrol edilir
+    return {"surum": surum(), "arayuzsuz": True, "hazir": hazir, "denendi": k.get("denendi"), "hata": k.get("hata"),
+            "lisans_kaydedildi": bool(k.get("lisans") or LISANS_ISARETI.is_file()),
+            "motor_calisiyor": any(x.calisiyor() for x in list(KOSULAR.values()))}
+
+
+# ---------------------------------------------------------------- panelin kullandığı işler (eski MCP köprüsüyle aynı adlar)
 
 
 async def sahne_kur(kod: str, ayar: dict) -> dict:
-    """Kameranın sahnesini bulur ya da kurar. Dönüş: sahne bilgisi."""
-    await bloklari_kur()
+    """Kameranın koşusunu hazırlar: Studio ve hazır sahne yerinde mi, bloklar ve motor güncel mi."""
     tur = (ayar.get("kamera") or {}).get("tur", "rtsp")
-    eski = _kayitli().get(kod)
-    # blok tanımı, kaynak türü ya da Studio çıkışları değiştiyse sahne yeniden kurulur
-    if isinstance(eski, dict) and eski.get("blok") == studio_blok.imza() and eski.get("cikis") == cikis_imzasi(kod) and eski.get("tur") == tur:
-        bilgi = await sahneyi_oku(eski["sahne"])
-        if bilgi:
-            return bilgi
-    veri = await cagir("graph.program", {"target": "create_new", "expectedRevision": "none", "idempotencyKey": _anahtar(),
-                                         "source": sahne_kaynagi(kod, tur, studio_cikislari(kod))})
-    bilgi = await sahneyi_oku(veri["scene"])
-    if not bilgi:
-        raise StudioHatasi("İSG sahnesi Studio'da kurulamadı.")
-    _kaydet(kod, veri["scene"], tur)
-    return bilgi
+    if tur == "usb":
+        raise StudioHatasi("USB kamera arayüzsüz çalışmada henüz desteklenmiyor. Kamerayı IP kamera ya da video dosyası olarak ekleyin.")
+    studio_python()
+    sablon()
+    bloklari_kur()
+    return {"kod": kod, "tur": tur, "adres": "", "kosu": None}
 
 
 async def yeni_kosu(bilgi: dict, kod: str) -> str:
-    """Kamera kodu girişine yeni bir koşu numarası yazar: bloklar önceki çalıştırmadan kalan durumu bırakır.
-    Dönüş: koşu numarası (motorun kuyruğa bıraktığı kayıtlar bu numarayı taşır)."""
-    dugum = bilgi["dugumler"][KOD_BASLIGI]
-    kosu = secrets.token_hex(4)
-    kaynak = f"ref('{dugum}').params['threshold'] = {_tirnak(kod + '#' + kosu)}"
-    for deneme in (1, 2):
-        try:
-            veri = await cagir("graph.program", {"sceneId": bilgi["sahne"], "expectedRevision": bilgi["revizyon"], "idempotencyKey": _anahtar(), "source": kaynak})
-            bilgi["revizyon"] = veri.get("revision", bilgi["revizyon"])
-            return kosu
-        except StudioHatasi as e:
-            if deneme == 2 or ("REVISION" not in str(e).upper() and "CONFLICT" not in str(e).upper()):
-                raise
-            g = await cagir("graph.read", {"sceneId": bilgi["sahne"], "view": "overview"})
-            bilgi["revizyon"] = g["revision"]
-    return kosu
-
-
-async def _duzenle(bilgi: dict, kaynak: str) -> None:
-    for deneme in (1, 2):
-        try:
-            veri = await cagir("graph.program", {"sceneId": bilgi["sahne"], "expectedRevision": bilgi["revizyon"], "idempotencyKey": _anahtar(), "source": kaynak})
-            bilgi["revizyon"] = veri.get("revision", bilgi["revizyon"])
-            return
-        except StudioHatasi as e:
-            if deneme == 2 or ("REVISION" not in str(e).upper() and "CONFLICT" not in str(e).upper()):
-                raise
-            g = await cagir("graph.read", {"sceneId": bilgi["sahne"], "view": "overview"})
-            bilgi["revizyon"] = g["revision"]
+    """Yeni bir koşu numarası verir: motorun kuyruğa bıraktığı kayıtlar bu numarayı taşır."""
+    bilgi["kosu"] = secrets.token_hex(4)
+    return bilgi["kosu"]
 
 
 async def kamera_adresi(bilgi: dict, adres: str) -> None:
-    """Camera IP bloğunun adresini yazar. Şifre içerebildiği için sahne durunca boşaltılır (adres = '')."""
-    dugum = bilgi["dugumler"].get(KAMERA_BASLIGI)
-    if not dugum:
-        raise StudioHatasi("Sahnede kamera bloğu yok.")
-    await _duzenle(bilgi, f"ref('{dugum}').params['address'] = {_tirnak(adres)}")
+    """Canlı akış adresi koşunun ortamına verilir (dosyaya ya da sahneye yazılmaz)."""
+    bilgi["adres"] = adres
 
 
 async def calistir(bilgi: dict, sure_ms: int | None = None) -> dict:
-    """Sahneyi sürekli çalıştırır. `sure_ms` verilirse o kadar sonra kendiliğinden durur."""
-    kural = bilgi["ham"][bilgi["dugumler"][studio_blok.KURALLAR_BASLIK]]
-    arg = {"sceneId": bilgi["sahne_ham"] or bilgi["sahne"], "mode": "indefinite", "idempotencyKey": _anahtar(), "waitTimeoutMs": 0,
-           "observations": [{"key": "durum", "view": "node_output", "nodeId": kural, "outputIndex": 4, "required": False}]}
+    """Sahneyi arayüzsüz başlatır. `sure_ms` verilirse o kadar sonra akışı bitirir."""
+    canli = bilgi["tur"] in CANLI_TURLER
+    k = baslat(bilgi["kod"], bilgi["kosu"] or secrets.token_hex(4), bilgi.get("adres", ""), canli=canli)
+    bilgi["surec"] = k
     if sure_ms:
-        arg["stopAfterMs"] = int(sure_ms)
-    return await cagir("scene.run.start", arg)
+        def zamanla():
+            time.sleep(sure_ms / 1000)
+            if k.calisiyor():
+                k.dur.touch()
+        threading.Thread(target=zamanla, daemon=True, name=f"studio-sure-{bilgi['kod']}").start()
+    return {"pid": k.surec.pid}
 
 
 async def durdur(bilgi: dict, dogrula_sn: float = 20.0) -> None:
-    """Sahneyi durdurur ve durduğunu doğrular: Studio motorun çalışmadığını bildirene kadar bekler.
-    Doğrulanamazsa (durdurma isteği hata verdi, Studio durumu bildirmedi ya da motor hâlâ çalışıyor) StudioHatasi."""
-    await cagir("scene.stop", {"sceneId": bilgi["sahne_ham"] or bilgi["sahne"], "idempotencyKey": _anahtar()})
-    son = time.monotonic() + dogrula_sn
-    while True:
-        calisiyor = (await cagir("studio.status.get", {})).get("engineRunning")
-        if calisiyor is False:
-            return
-        if time.monotonic() >= son:
-            raise StudioHatasi("Studio sahnenin durduğunu bildirmedi" + (" (motor hâlâ çalışıyor)." if calisiyor else " (motor durumu okunamadı)."))
-        await asyncio.sleep(0.5)
+    """Akışı bitirir ve süreci kapatır; kapandığı doğrulanamazsa StudioHatasi."""
+    k = bilgi.get("surec") or KOSULAR.get(bilgi["kod"])
+    if k is None:
+        return
+    k.bitir()
+    with _KILIT:
+        if KOSULAR.get(bilgi["kod"]) is k:
+            KOSULAR.pop(bilgi["kod"])
+    if k.calisiyor():
+        raise StudioHatasi("Studio süreci kapatılamadı.")
+
+
+def kosu_sorunu(bilgi: dict) -> str | None:
+    """Koşu kendiliğinden bittiyse (lisans, eksik dosya, çökme) nedeni."""
+    k = bilgi.get("surec")
+    return k.sorun() if k is not None else None
 
 
 # ---------------------------------------------------------------- geliştirme komutları
 
 
-async def _komut(arg: list[str]) -> None:
+def _komut(arg: list[str]) -> None:
     yollar.hazirla()
     if arg[0] == "durum":
-        print(await durum())
-        return
-    kod = arg[1]
-    ayar = json.loads((yollar.AYAR / f"{kod}.json").read_text(encoding="utf-8"))
-    bilgi = await sahne_kur(kod, ayar)
-    if arg[0] == "kur":
-        print(bilgi["metin"])
-        print({k: v for k, v in bilgi.items() if k not in ("metin",)})
+        print(asyncio.run(durum()))
+    elif arg[0] == "dene":
+        print(dene())
     elif arg[0] == "calistir":
-        await yeni_kosu(bilgi, kod)
-        veri = await calistir(bilgi, int(float(arg[2]) * 1000) if len(arg) > 2 else None)
-        print(json.dumps(veri, ensure_ascii=False)[:1500])
-    elif arg[0] == "durdur":
-        await durdur(bilgi)
+        kod = arg[1]
+        ayar = json.loads((yollar.AYAR / f"{kod}.json").read_text(encoding="utf-8"))
+        bilgi = asyncio.run(sahne_kur(kod, ayar))
+        asyncio.run(yeni_kosu(bilgi, kod))
+        asyncio.run(calistir(bilgi))
+        time.sleep(float(arg[2]) if len(arg) > 2 else 30)
+        print("sorun:", kosu_sorunu(bilgi))
+        asyncio.run(durdur(bilgi))
         print("durduruldu")
 
 
 if __name__ == "__main__":
-    asyncio.run(_komut(sys.argv[1:]))
+    _komut(sys.argv[1:])

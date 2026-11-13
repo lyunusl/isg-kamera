@@ -1,16 +1,18 @@
-"""İSG Kamera için Windows'ta AugeLab Studio kurulumu ve başlatma.
+"""İSG Kamera için Windows'ta AugeLab Studio kurulumu ve lisans kaydı. Studio penceresi hiç açılmaz.
 
-Panel bunu adım adım gösterir (Fişoku'daki kurulum sihirbazı gibi):
+Kurulum dosyası ve panel bunu adım adım gösterir (Fişoku'daki kurulum sihirbazı gibi):
 1. AugeLab'in resmî kurucusunu indirir ve SHA-256 özetini doğrular,
 2. Microsoft Visual C++ 2015-2022 çalışma kitaplığı (x64) yoksa Microsoft'tan indirir, Microsoft imzasını doğrular ve kurar,
 3. Studio'yu kullanıcı klasörüne sessizce kurar; olmazsa resmî kurulum penceresini açar,
-4. Studio'yu başlatır.
-Lisans kodu her zaman Studio'nun kendi penceresine girilir; İSG Kamera onu görmez, saklamaz."""
+4. kullanıcının AugeLab hesabından aldığı lisans kodunu Studio'nun kendi komutuyla arayüzsüz kaydeder
+   (studio verify; kod komut satırına değil ortam değişkenine konur). Kod saklanmaz ve günlüğe yazılmaz.
+Analiz de arayüzsüz yapılır (studio.py)."""
 from __future__ import annotations
 
 import contextlib
 import hashlib
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -268,15 +270,33 @@ def _kurulumu_bekle(sinir_dk: float, is_) -> Path | None:
     return kurulu_studio()
 
 
-def _baslat(studio: Path) -> None:
-    _harici_program(studio, cwd=studio.parent)
+LISANS_KODU = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+/=-]{5,1023}")
+# `studio verify <kod>` ile aynı komut; kod komut satırında görünmesin diye ortam değişkeniyle verilir (kurulum dosyası da böyle).
+VERIFY = ("import os,runpy,sys; sys.argv=['studio','verify',os.environ.pop('ISG_LISANS_KODU','')]; "
+          "runpy.run_module('studio',run_name='__main__',alter_sys=True)")
 
 
-def ac() -> None:
+def lisans_kaydet(kod: str) -> None:
+    """AugeLab hesabından alınan lisans (doğrulama) kodunu Studio'nun kendi komutuyla, Studio penceresi açılmadan bu
+    bilgisayara kaydeder. Kod yalnızca Studio'ya verilir: saklanmaz, günlüğe ve hata metnine yazılmaz."""
+    kod = (kod or "").strip()
+    if not LISANS_KODU.fullmatch(kod):
+        raise SystemExit("Lisans kodu geçersiz görünüyor. AugeLab hesabınızdaki kodu boşluksuz, olduğu gibi yapıştırın.")
     studio = kurulu_studio()
     if studio is None:
-        raise SystemExit("AugeLab Studio bulunamadı. Önce kurulum düğmesini kullanın.")
-    _baslat(studio)
+        raise SystemExit("AugeLab Studio kurulu değil. Önce Studio'yu kurun.")
+    py = studio.parent / "Python" / "python.exe"
+    try:
+        with _temiz_dll_dizini():
+            r = subprocess.run([str(py), "-c", VERIFY], capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180, cwd=str(studio.parent), stdin=subprocess.DEVNULL,
+                               env=dict(os.environ, ISG_LISANS_KODU=kod), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        raise SystemExit("AugeLab Studio lisans kodunu zamanında doğrulamadı. İnternet bağlantısını kontrol edip tekrar deneyin.") from None
+    except OSError as e:
+        raise SystemExit(f"AugeLab Studio çalıştırılamadı: {e}") from None
+    if r.returncode != 0:  # Studio'nun çıktısı gösterilmez: kodun bir parçasını içerebilir
+        raise SystemExit("Lisans kodu kaydedilemedi. Kodu AugeLab hesabınızdan yeniden alıp deneyin.")
 
 
 def kur(is_) -> dict:
@@ -297,8 +317,7 @@ def _kur(is_) -> dict:
         raise SystemExit("Bu kurulum Windows x64 içindir.")
     mevcut = kurulu_studio()
     if mevcut is not None:
-        print("Mevcut AugeLab Studio açılıyor.", flush=True)
-        _baslat(mevcut)
+        print("AugeLab Studio zaten kurulu.", flush=True)
         return {"kurulu": True}
 
     hedef = varsayilan_klasor()
@@ -340,7 +359,17 @@ def _kur(is_) -> dict:
     if studio is None:
         raise SystemExit(f"Studio kurulumu tamamlanmadı veya bulunamadı (kod {kod}). Kurulumu kontrol edin ve paneli yenileyin.")
     time.sleep(3)  # kurucu dosyalarını bıraksın
+    _studio_penceresini_kapat()
     DURUM.update(asama="bos", ne="", baslangic=0.0)
-    print("Studio açılıyor. Lisans kodu isterse panelden “Lisans kodumu al” ile AugeLab hesabınızdan alın.", flush=True)
-    _baslat(studio)
+    print("AugeLab Studio kuruldu. Sıradaki adım: AugeLab hesabınızdaki lisans kodunu girin.", flush=True)
     return {"kurulu": True}
+
+
+def _studio_penceresini_kapat() -> None:
+    """Resmî kurucu bitince Studio'yu kendiliğinden açarsa kapatır: İSG Kamera Studio'yu arayüzsüz kullanır."""
+    for _ in range(10):
+        if studio_calisiyor():
+            subprocess.run(["taskkill", "/IM", EXE, "/T"], capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return
+        time.sleep(1)
+        _CALISIYOR["an"] = 0.0
