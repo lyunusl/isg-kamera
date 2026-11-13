@@ -92,7 +92,7 @@ def dogrula(ham: bytes, klasor: str, anahtar_kimligi: bytes, imzalayan_ozeti: by
         _, n = cihaz_anahtari.acik_bilesenler(cihaz)
         sarili = coz64(lisans["sarili"])
         if len(sarili) != n.bit_length() // 8:
-            raise ValueError("Şifreli anahtar boyutu geçersiz.")
+            raise ValueError("Model lisansı anahtar boyutu geçersiz.")
         return {"bitis": son, "cihaz": lisans["cihaz"], "sarili": sarili}
     except cihaz_anahtari.CihazHatasi as e:
         raise LisansHatasi(str(e)) from None

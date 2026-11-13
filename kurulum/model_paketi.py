@@ -111,7 +111,7 @@ def komut_sifrele(a) -> int:
         duz = (DUZ / d).read_bytes()
         sifreli = kasa.sifrele(duz, anahtar, d)
         if kasa.coz(sifreli, anahtar, d) != duz:
-            raise SystemExit(f"{d}: şifrelenen veri geri açılamadı")
+            raise SystemExit(f"{d}: model paketi doğrulanamadı")
         gecici = CIKTI / (d + kasa.UZANTI + ".yeni")
         gecici.write_bytes(sifreli)
         os.replace(gecici, CIKTI / (d + kasa.UZANTI))
@@ -169,11 +169,11 @@ def komut_dogrula(a) -> int:
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    ap = argparse.ArgumentParser(description="İSG Kamera model paketi: şifreleme ve etkinleştirme kodları")
+    ap = argparse.ArgumentParser(description="İSG Kamera model paketi ve etkinleştirme kodları")
     alt = ap.add_subparsers(dest="komut", required=True)
     p = alt.add_parser("anahtar", help="ana anahtarın durumu; --uret ile üretir")
     p.add_argument("--uret", action="store_true")
-    alt.add_parser("sifrele", help="dört modeli şifreler")
+    alt.add_parser("sifrele", help="dört modelden dağıtım paketi oluşturur")
     p = alt.add_parser("kod", help="etkinleştirme kodu üretir ve pakete ekler")
     p.add_argument("--adet", type=int, default=1)
     p.add_argument("--dosya", help="kodların ekleneceği dosya (deponun dışında); verilmezse ekrana yazılır")

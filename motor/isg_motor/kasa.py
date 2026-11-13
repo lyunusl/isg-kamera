@@ -106,7 +106,7 @@ def _cng():
         raise KasaHatasi("desteklenmiyor", "AES sağlayıcısı açılamadı")
     kip = ctypes.create_unicode_buffer("ChainingModeGCM")
     if b.BCryptSetProperty(saglayici, "ChainingMode", ctypes.cast(kip, V), ctypes.sizeof(kip), 0):
-        raise KasaHatasi("desteklenmiyor", "AES-GCM kipi açılamadı")
+        raise KasaHatasi("desteklenmiyor", "Model paketi açılamadı")
     _CNG = (ctypes, b, Bilgi, saglayici)
     return _CNG
 
@@ -141,7 +141,7 @@ def _aes_gcm(anahtar: bytes | bytearray, nonce: bytes, veri: bytes, ek: bytes, e
         if sonuc == _ETIKET_UYUSMADI:
             raise KasaHatasi("bozuk")
         if sonuc or yazilan.value != len(veri):
-            raise KasaHatasi("desteklenmiyor", f"AES-GCM işlemi başarısız (0x{sonuc:08X})")
+            raise KasaHatasi("desteklenmiyor", f"Model paketi işlenemedi (0x{sonuc:08X})")
         govde = ctypes.string_at(cikti, len(veri))
         return (govde, etiket_t.raw) if etiket is None else govde
     finally:

@@ -19,8 +19,8 @@ SINIR = 128 * 1024 * 1024 + BASLIK + ETIKET
 _MESAJ = {
     1: "Model dosyasının biçimi geçersiz. İSG Kamera kurulumunu yeniden indirin.",
     2: "Model dosyası doğrulanamadı. İSG Kamera kurulumunu yeniden indirin.",
-    3: "Yerel lisans durumu okunamadı. AugeLab Studio'yu açın ve varsayılan 8765 portunda MCP'yi etkinleştirin.",
-    4: "AugeLab Studio'da etkin bir Community veya Premium lisansı bulunamadı.",
+    3: "AugeLab Studio lisans durumu doğrulanamadı. Analizi Studio üzerinden yeniden başlatın.",
+    4: "AugeLab Studio'da arayüzsüz analize izin veren etkin bir lisans bulunamadı.",
 }
 
 
@@ -88,11 +88,13 @@ def durum(klasor, dosyalar) -> dict:
             with (klasor / (ad + UZANTI)).open("rb") as f:
                 if f.read(24) != SIHIR + kimlik:
                     raise LisansHatasi(_MESAJ[1])
-        yetki(_dosya(klasor, kimlik))
+        if not _dosya(klasor, kimlik).is_file():
+            raise LisansHatasi(_MESAJ[1])
     except (OSError, LisansHatasi) as e:
-        return dict(sonuc, durum="studio_lisans_gerekli",
+        return dict(sonuc, durum="bozuk",
                     mesaj=str(e) if isinstance(e, LisansHatasi) else _MESAJ[1])
-    return dict(sonuc, durum="etkin")
+    # Panel süreci Studio değildir. Lisans model açılırken DLL tarafından doğrulanır.
+    return dict(sonuc, durum="studio_kosusunda_dogrulanir")
 
 
 def ac(yol) -> tuple[bytes, Path]:
