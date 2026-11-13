@@ -239,8 +239,10 @@ def test(ayar: dict, ayar_yol: Path, sifre: str | None = None) -> int:
     yol = yollar.AYAR / f"_kare_{kod(ayar, ayar_yol)}.jpg"
     yol.parent.mkdir(parents=True, exist_ok=True)
     gizli, sayi = yuzleri_gizle(kare)
+    if not sayi:  # model bir kişiyi kaçırmış olabilir: yüz açık kalmasın diye bütün kare bulanıklaştırılır
+        gizli = cv2.GaussianBlur(gizli, (0, 0), max(4.0, W / 160))
     cv2.imwrite(str(yol), gizli)  # bölge çizmek için; yüzler gizli
-    print(f"Kare kaydedildi: {sayi} yüz gizlendi." if sayi else "Kare kaydedildi: görüntüde kişi bulunamadı.", flush=True)
+    print(f"Kare kaydedildi: {sayi} yüz gizlendi." if sayi else "Kare kaydedildi: kişi bulunamadı, kare bulanıklaştırıldı.", flush=True)
     if W > 1920:
         print("Not: çözünürlük yüksek; analiz için alt akış (720p) yeterli ve çok daha hızlı.", flush=True)
     return 0

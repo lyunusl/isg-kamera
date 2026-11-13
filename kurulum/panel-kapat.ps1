@@ -1,17 +1,18 @@
 # Kurulumdan once bu klasordeki acik ISG Kamera panelini kapatir: once panelin kendi Kapat istegiyle (Studio kosulari da
-# duzgunce durur), kapanmazsa yalnizca bu exe'nin sureclerini sonlandirarak. Cikis kodu: 0 kapali, 1 hala acik.
+# duzgunce durur), kapanmazsa yalnizca bu exe'nin sureclerini sonlandirarak. Kapat istegi yalnizca bu sureclerin
+# dinledigi portlara gider. Cikis kodu: 0 kapali, 1 hala acik.
 param([Parameter(Mandatory = $true)][string]$Uygulama)
 $ErrorActionPreference = 'SilentlyContinue'
 $hedef = [IO.Path]::GetFullPath($Uygulama)
 function Surecler { @(Get-Process -Name IsgKamera -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ($_.Path -ieq $hedef) }) }
-if ((Surecler).Count -eq 0) { exit 0 }
-foreach ($p in 8780..8804) {
+$ilk = Surecler
+if ($ilk.Count -eq 0) { exit 0 }
+$portlar = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+  Where-Object { $ilk.Id -contains $_.OwningProcess } | Select-Object -ExpandProperty LocalPort -Unique)
+foreach ($p in $portlar) {
   try {
-    $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$p/api/durum"
-    if ($r.Headers['Server'] -like 'IsgKamera*') {
-      Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Method Post -Uri "http://127.0.0.1:$p/api/kapat" `
-        -ContentType 'application/json' -Body '{}' | Out-Null
-    }
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Method Post -Uri "http://127.0.0.1:$p/api/kapat" `
+      -ContentType 'application/json' -Body '{}' | Out-Null
   } catch {}
 }
 for ($i = 0; $i -lt 40 -and (Surecler).Count -gt 0; $i++) { Start-Sleep -Milliseconds 500 }
