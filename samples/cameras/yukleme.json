@@ -1,0 +1,112 @@
+{
+ "name": "Loading area",
+ "code": "yukleme",
+ "source": {
+  "type": "file",
+  "path": "videos/yukleme.mp4"
+ },
+ "ppe_everywhere": true,
+ "zones": [
+  {
+   "name": "Pedestrian walkway",
+   "type": "walkway",
+   "poly": [
+    [
+     0.0,
+     0.1
+    ],
+    [
+     0.11,
+     0.07
+    ],
+    [
+     0.27,
+     0.22
+    ],
+    [
+     0.42,
+     0.42
+    ],
+    [
+     0.57,
+     0.64
+    ],
+    [
+     0.72,
+     0.88
+    ],
+    [
+     0.82,
+     1.0
+    ],
+    [
+     0.5,
+     1.0
+    ],
+    [
+     0.33,
+     0.62
+    ],
+    [
+     0.17,
+     0.3
+    ],
+    [
+     0.06,
+     0.13
+    ],
+    [
+     0.0,
+     0.13
+    ]
+   ]
+  },
+  {
+   "name": "Forklift lane",
+   "type": "vehicle_lane",
+   "poly": [
+    [
+     0.3,
+     0.2
+    ],
+    [
+     1.0,
+     0.1
+    ],
+    [
+     1.0,
+     1.0
+    ],
+    [
+     0.85,
+     1.0
+    ],
+    [
+     0.6,
+     0.62
+    ],
+    [
+     0.45,
+     0.42
+    ]
+   ]
+  }
+ ],
+ "rules": [
+  {
+   "id": "off_walkway"
+  },
+  {
+   "id": "vehicle_pedestrian"
+  },
+  {
+   "id": "vehicle_off_lane"
+  },
+  {
+   "id": "hard_hat"
+  },
+  {
+   "id": "vest"
+  }
+ ]
+}

@@ -5,16 +5,22 @@ __pycache__/
 build/
 dist/
 
-# Yerel ortam ve çalışma verisi
+# Local environment and runtime data
 .env
 .env.*
 .dev/
-veri/
+data/
 logs/
+engine/deps/
+engine/models/
+engine/engine.json
+# old names (before the English layout): a source checkout's leftover folders stay out of git
+veri/
 motor/deps/
+motor/modeller/
 motor/ayar.json
 
-# Gizli kalması gerekenler: anahtarlar, sertifikalar, lisans dosyaları, AugeLab Studio projeleri
+# Must stay private: keys, certificates, license files, AugeLab Studio projects
 *.pem
 *.key
 *.pfx
@@ -22,14 +28,19 @@ motor/ayar.json
 *.lic
 *.pmod
 
-# Yerel model paketleri ve anahtarlar
+# Local model packages and keys
+installer/encrypted-models/
+installer/licensed-models/
+installer/community-models/
+installer/scene/
 kurulum/sifreli-modeller/
 kurulum/lisansli-modeller/
 kurulum/community-modeller/
+kurulum/sahne/
 model-cihaz-istegi*.json
 *.dpapi
 
-# Veritabanları ve arşivler
+# Databases and archives
 *.db
 *.db-journal
 *.db-wal
@@ -45,19 +56,24 @@ model-cihaz-istegi*.json
 *.tar
 *.tar.gz
 
-# Günlük ve geçici dosyalar
+# Logs and temporary files
 *.log
 *.err
 *.img
 *.ok
 *.sh
 
-# Geliştirme dosyaları
+# Development files
+/training/
+/tests/
 /egitim/
+/requirements-dev.txt
 /requirements-gelistirme.txt
+# old names (before the English layout)
 datasets/
 runs/
 *.pt
 
-# Yerel sınama sonuçları
+# Local test evidence (screenshots, logs)
+test-results/
 test-sonuclari/

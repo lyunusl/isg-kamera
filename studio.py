@@ -1,22 +1,23 @@
-"""AugeLab Studio köprüsü: arayüzsüz koşu.
+"""AugeLab Studio bridge: headless runs.
 
-İSG Kamera, Studio'nun kodunu içermez ve Studio penceresini hiç açmaz. Kullanıcının kurduğu Studio'nun kendi Python'uyla
-her kamera için gizli bir süreç başlatır:
+İSG Kamera does not contain Studio's code and never opens the Studio window. With the Python of the Studio the user
+installed, it starts a hidden process for each camera:
 
     "<Studio>/Python/python.exe" -m studio run isg-kamera.pmod --json
 
-isg-kamera.pmod, programla gelen hazır sahnedir (Studio sahne dosyalarını şifreli kaydettiği için bir kez Studio'da kurulup
-kaydedilmiştir: kurulum/sablon.py):
+isg-kamera.pmod is the ready-made scene shipped with the program (Studio saves scene files encrypted, so it was built
+and saved once in Studio: installer/build_scene.py):
 
-    İSG Kamera Kodu ─────────────────────┬──────────────────┐
-    İSG Video ┬► İSG Algılama ─► İSG İskelet ─► İSG Kurallar ─► olaylar, klipler, ölçümler (panelin kuyruğuna)
-              └────────────────────────────────► (görüntü, zaman, bitti)
+    ISG Camera Code ─────────────────────┬────────────────┐
+    ISG Video ┬► ISG Detection ─► ISG Pose ─► ISG Rules ─► events, clips, measurements (to the panel's queue)
+              └──────────────────────────────► (image, time, done)
 
-Sahne her kamera için aynıdır; hangi kamerayı işleyeceğini ortam değişkenlerinden öğrenir (isg_motor.blok: ISG_KAMERA
-"kod#koşu", ISG_KAMERA_ADRES canlı akış adresi, ISG_DUR durdurma dosyası). Panel önce bloklarını Studio'nun özel blok
-klasörüne yazar ve motorunu (isg_motor, modeller, onnxruntime) yanına koyar; Studio'nun ortamına paket kurulmaz.
+The scene is the same for every camera; it learns which camera to process from environment variables (isg_core.blocks:
+ISG_CAMERA "code#run", ISG_CAMERA_URL live stream address, ISG_STOP_FILE stop file, ISG_LANG language). The panel first
+writes its blocks to Studio's custom block folder and puts its engine (isg_core, models, onnxruntime) next to it; no
+package is installed into Studio's environment.
 
-Geliştirme için:  python studio.py durum | dene | calistir <kamera> [saniye]
+For development:  python studio.py status | probe | run <camera> [seconds]
 """
 from __future__ import annotations
 
@@ -32,461 +33,499 @@ import threading
 import time
 from pathlib import Path
 
-import studio_blok
-import yollar
+import i18n
+import paths
+import studio_blocks
+from i18n import T
 
-KAYNAK = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-MOTOR_KAYNAK = KAYNAK / "motor"
-SABLON_KAYNAK = KAYNAK / "kurulum" / "sahne" / "isg-kamera.pmod"
-DURUM_DOSYASI = yollar.VERI / "studio.json"
-LISANS_ISARETI = yollar.VERI / "studio-lisans.txt"  # kurulum dosyası lisans kodunu Studio'ya kaydedince bırakır (kodun kendisi değil)
-KOSU_KLASORU = yollar.VERI / "studio"
-PENCERESIZ = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-CANLI_TURLER = ("rtsp", "onvif", "http")
+BUNDLE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+ENGINE_SOURCE = BUNDLE / "engine"
+SCENE_SOURCE = BUNDLE / "installer" / "scene" / "isg-kamera.pmod"
+STATUS_FILE = paths.DATA / "studio.json"
+LICENSE_MARKER = paths.DATA / "studio-license.txt"  # left by the installer once it saved the license code in Studio (not the code itself)
+_LEGACY_LICENSE_MARKER = paths.DATA / "studio-lisans.txt"  # name written by the v0.1.0 installer
+RUN_DIR = paths.DATA / "studio"
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+LIVE_TYPES = ("rtsp", "onvif", "http")
 
-
-class StudioHatasi(RuntimeError):
-    """Studio bir isteği reddetti ya da sahne çalışmadı."""
-
-
-class StudioYok(StudioHatasi):
-    """AugeLab Studio kurulu değil: beklenebilir, hata değil."""
-
-
-# ---------------------------------------------------------------- Studio'nun yerleri
+ENGINE_PARTS = ("isg_core", "models", "deps")  # engine subfolders mirrored into marketplace/isg_engine
+# Left in marketplace/isg_engine and custom_blocks by v0.1.0; removed during the normal mirroring.
+_LEGACY_ENGINE_DIRS = ("isg_motor", "modeller")
+_LEGACY_ENGINE_FILES = ("isg_motor.surum", "modeller.surum", "deps.surum", "surum.txt", "ayar.json")
+_LEGACY_BLOCK_OP_CODES = ("IsgAlgila", "IsgIskelet", "IsgKurallar")
 
 
-def kurulu_klasor() -> Path | None:
-    import studio_kurulum
+class StudioError(RuntimeError):
+    """Studio rejected a request or the scene did not run."""
 
-    exe = studio_kurulum.kurulu_studio()
+
+class StudioMissing(StudioError):
+    """AugeLab Studio is not installed: expected, not an error."""
+
+
+# ---------------------------------------------------------------- where Studio lives
+
+
+def install_dir() -> Path | None:
+    import studio_setup
+
+    exe = studio_setup.installed_studio()
     return exe.parent if exe else None
 
 
 def studio_python() -> Path:
-    """Studio'nun kendi Python yorumlayıcısı (arayüzsüz koşu bununla yapılır)."""
-    klasor = kurulu_klasor()
-    if klasor is None:
-        raise StudioYok("AugeLab Studio kurulu değil. Kurulum sihirbazıyla kurun.")
-    py = klasor / "Python" / "python.exe"
+    """Studio's own Python interpreter (headless runs use it)."""
+    folder = install_dir()
+    if folder is None:
+        raise StudioMissing(T("AugeLab Studio is not installed. Install it with the setup wizard."))
+    py = folder / "Python" / "python.exe"
     if not py.is_file():
-        raise StudioHatasi(f"AugeLab Studio'nun Python'u bulunamadı ({py}). Studio'yu resmî kurucuyla onarın.")
+        raise StudioError(T("AugeLab Studio's Python was not found ({path}). Repair Studio with the official installer.", path=py))
     return py
 
 
 def marketplace() -> Path:
-    """Studio'nun özel blok klasörünün bulunduğu yer (Studio bunu her kullanıcı için %APPDATA% altında tutar)."""
+    """Where Studio's custom block folder is (Studio keeps it under %APPDATA% for each user)."""
     return Path(os.environ.get("APPDATA", str(Path.home()))) / "AugeLab Studio" / "marketplace"
 
 
-def surum() -> str | None:
-    """Kurulu Studio'nun sürümü (paket bilgisinden; Studio çalıştırılmaz)."""
-    klasor = kurulu_klasor()
-    if klasor is None:
+def version() -> str | None:
+    """Version of the installed Studio (from the package metadata; Studio is not run)."""
+    folder = install_dir()
+    if folder is None:
         return None
-    for bilgi in sorted((klasor / "Python" / "Lib" / "site-packages").glob("studio-*.dist-info")):
-        return bilgi.name[len("studio-"):-len(".dist-info")]
+    for info in sorted((folder / "Python" / "Lib" / "site-packages").glob("studio-*.dist-info")):
+        return info.name[len("studio-"):-len(".dist-info")]
     return None
 
 
-# ---------------------------------------------------------------- motor klasörü
+# ---------------------------------------------------------------- engine folder
 
 
-def _dosyalar(klasor: Path) -> list[Path]:
-    return sorted(p for p in klasor.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
+def _files(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
 
 
-def _dosya_ozeti(p: Path) -> bytes:
-    """Dosyanın tüm içeriğinin SHA-256 özeti."""
-    with p.open("rb") as dosya:
-        return hashlib.file_digest(dosya, "sha256").digest()
+def _file_digest(p: Path) -> bytes:
+    """SHA-256 digest of the whole file content."""
+    with p.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").digest()
 
 
-def _parmak_izi(klasor: Path) -> str:
-    """Klasörün içerik imzası: dosya adları ve içerik özetleri. Dosya tarihine bakılmaz: exe her açılışta dosyalarını
-    geçici bir klasöre yeni tarihle açar; tarih imzaya girseydi motor her açılışta yeniden kopyalanırdı."""
+def _fingerprint(folder: Path) -> str:
+    """Content signature of a folder: file names and content digests. File dates are ignored: the exe unpacks its files
+    into a temporary folder with new dates on every start; with dates in the signature the engine would be copied again
+    on every start."""
     h = hashlib.sha256()
-    dosyalar = _dosyalar(klasor)
-    for p in dosyalar:
-        h.update(p.relative_to(klasor).as_posix().encode("utf-8") + b"\0" + _dosya_ozeti(p))
-    return f"{len(dosyalar)}:{h.hexdigest()[:40]}"
+    files = _files(folder)
+    for p in files:
+        h.update(p.relative_to(folder).as_posix().encode("utf-8") + b"\0" + _file_digest(p))
+    return f"{len(files)}:{h.hexdigest()[:40]}"
 
 
-def _esitle(kaynak: Path, hedef: Path) -> int:
-    """Hedef klasörü kaynağın aynısı yapar; yalnızca içeriği farklı olan dosyalara dokunur. Dönüş: kopyalanan dosya sayısı.
+def _sync(source: Path, target: Path) -> int:
+    """Makes the target folder identical to the source; touches only files whose content differs. Returns the number of
+    files copied.
 
-    Aynı kalan dosyalar yeniden yazılmaz: Studio açıkken yüklediği kitaplıklar (onnxruntime) kilitlidir ve üstlerine
-    yazılamaz. Gerçekten değişmiş bir dosya kilitliyse anlaşılır bir hata verilir. Kaynakta artık olmayan dosyalar silinir;
-    silinemeyen (kullanımda olan) eski dosya yerinde kalır."""
-    hedef.mkdir(parents=True, exist_ok=True)
-    kaynaklar = {p.relative_to(kaynak): p for p in _dosyalar(kaynak)}
-    kopya = 0
-    for goreli, p in kaynaklar.items():
-        h = hedef / goreli
+    Unchanged files are not rewritten: libraries Studio has loaded (onnxruntime) are locked while it runs and cannot be
+    overwritten. If a file that really changed is locked, a clear error is raised. Files no longer in the source are
+    deleted; an old file that cannot be deleted (in use) stays."""
+    target.mkdir(parents=True, exist_ok=True)
+    sources = {p.relative_to(source): p for p in _files(source)}
+    copied = 0
+    for rel, p in sources.items():
+        t = target / rel
         try:
-            ayni = h.is_file() and h.stat().st_size == p.stat().st_size and _dosya_ozeti(h) == _dosya_ozeti(p)
+            same = t.is_file() and t.stat().st_size == p.stat().st_size and _file_digest(t) == _file_digest(p)
         except OSError:
-            ayni = False  # hedef okunamadı: yeniden yazmayı dene
-        if ayni:
+            same = False  # target could not be read: try rewriting it
+        if same:
             continue
-        h.parent.mkdir(parents=True, exist_ok=True)
-        gecici = h.with_name(h.name + ".yeni")
+        t.parent.mkdir(parents=True, exist_ok=True)
+        tmp = t.with_name(t.name + ".new")
         try:
-            shutil.copyfile(p, gecici)
-            os.replace(gecici, h)
+            shutil.copyfile(p, tmp)
+            os.replace(tmp, t)
         except OSError:
             try:
-                gecici.unlink(missing_ok=True)
+                tmp.unlink(missing_ok=True)
             except OSError:
                 pass
-            raise StudioHatasi(f"Motor dosyası güncellenemedi ({goreli.as_posix()}): dosya kullanımda olabilir. "
-                               "Süren analizleri durdurup tekrar deneyin.") from None
-        kopya += 1
-    for h in _dosyalar(hedef):
-        if h.relative_to(hedef) not in kaynaklar:
+            raise StudioError(T("Could not update an engine file ({file}): the file may be in use. Stop running analyses "
+                                "and try again.", file=rel.as_posix())) from None
+        copied += 1
+    for t in _files(target):
+        if t.relative_to(target) not in sources:
             try:
-                h.unlink()
+                t.unlink()
             except OSError:
                 pass
-    return kopya
+    return copied
 
 
-def motoru_yerlestir(hedef: Path) -> Path:
-    """Motoru (isg_motor, modeller, deps) Studio'nun özel blok klasörünün yanına kopyalar; değişmediyse dokunmaz."""
-    if not (MOTOR_KAYNAK / "isg_motor").is_dir():
-        raise StudioHatasi(f"Motor kaynağı bulunamadı: {MOTOR_KAYNAK}")
-    hedef.mkdir(parents=True, exist_ok=True)
-    imzalar = []
-    for ad in ("isg_motor", "modeller", "deps"):
-        kaynak = MOTOR_KAYNAK / ad
-        if not kaynak.is_dir():
-            continue
-        imza = _parmak_izi(kaynak)
-        imzalar.append(imza)
-        isaret = hedef / f"{ad}.surum"
-        if (hedef / ad).is_dir() and isaret.exists() and isaret.read_text(encoding="ascii") == imza:
-            continue
-        _esitle(kaynak, hedef / ad)
-        isaret.write_text(imza, encoding="ascii")
-    surum = hedef / "surum.txt"  # yalnızca değiştiyse yazılır: bloklar bu dosyanın tarihine bakarak motoru yeniden yükler
-    if not surum.exists() or surum.read_text(encoding="ascii") != "|".join(imzalar):
-        surum.write_text("|".join(imzalar), encoding="ascii")
-    (hedef / "ayar.json").write_text(json.dumps({"veri": str(yollar.VERI)}), encoding="utf-8")
-    return hedef
-
-
-def bloklari_kur() -> Path:
-    """İSG bloklarını Studio'nun özel blok klasörüne yazar (yalnızca değiştiyse) ve motoru yanına yerleştirir.
-    Dosyalar Studio'nun node.custom.create ile ürettiklerinin aynısıdır (studio_blok.dosya_metni). Dönüş: motor klasörü."""
-    bloklar = marketplace() / "custom_blocks"
-    bloklar.mkdir(parents=True, exist_ok=True)
-    for tanim in studio_blok.TANIMLAR:
-        hedef = bloklar / f"{tanim['opCode']}.py"
-        metin = studio_blok.dosya_metni(tanim).replace("\n", "\r\n").encode("utf-8")
+def _remove_legacy_engine(target: Path) -> None:
+    """Deletes what the v0.1.0 panel left in the engine folder (old package and model folders, marker files). A file
+    Studio still holds stays and is tried again on the next start."""
+    for name in _LEGACY_ENGINE_DIRS:
+        folder = target / name
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+    for name in _LEGACY_ENGINE_FILES:
         try:
-            if hedef.is_file() and hedef.read_bytes() == metin:
+            (target / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def deploy_engine(target: Path) -> Path:
+    """Copies the engine (isg_core, models, deps) next to Studio's custom block folder; leaves it alone if unchanged."""
+    if not (ENGINE_SOURCE / "isg_core").is_dir():
+        raise StudioError(T("Engine source not found: {path}", path=ENGINE_SOURCE))
+    target.mkdir(parents=True, exist_ok=True)
+    signatures = []
+    for name in ENGINE_PARTS:
+        source = ENGINE_SOURCE / name
+        if not source.is_dir():
+            continue
+        signature = _fingerprint(source)
+        signatures.append(signature)
+        marker = target / f"{name}.version"
+        if (target / name).is_dir() and marker.exists() and marker.read_text(encoding="ascii") == signature:
+            continue
+        _sync(source, target / name)
+        marker.write_text(signature, encoding="ascii")
+    version_file = target / "version.txt"  # written only when changed: the blocks reload the engine by this file's date
+    if not version_file.exists() or version_file.read_text(encoding="ascii") != "|".join(signatures):
+        version_file.write_text("|".join(signatures), encoding="ascii")
+    (target / "engine.json").write_text(json.dumps({"data_dir": str(paths.DATA)}), encoding="utf-8")
+    _remove_legacy_engine(target)
+    return target
+
+
+def install_blocks() -> Path:
+    """Writes the İSG blocks to Studio's custom block folder (only if changed) and places the engine next to it.
+    The files are identical to what Studio's node.custom.create produces (studio_blocks.block_source). Block files of
+    v0.1.0 whose opCode was renamed are deleted (never other blocks). Returns the engine folder."""
+    blocks = marketplace() / "custom_blocks"
+    blocks.mkdir(parents=True, exist_ok=True)
+    current = set()
+    for definition in studio_blocks.DEFINITIONS:
+        current.add(definition["opCode"])
+        target = blocks / f"{definition['opCode']}.py"
+        text = studio_blocks.block_source(definition).replace("\n", "\r\n").encode("utf-8")
+        try:
+            if target.is_file() and target.read_bytes() == text:
                 continue
         except OSError:
             pass
-        gecici = hedef.with_name(hedef.name + ".yeni")
-        gecici.write_bytes(metin)
-        os.replace(gecici, hedef)
-    return motoru_yerlestir(marketplace() / studio_blok.MOTOR_KLASORU)
+        tmp = target.with_name(target.name + ".new")
+        tmp.write_bytes(text)
+        os.replace(tmp, target)
+    for op_code in _LEGACY_BLOCK_OP_CODES:
+        if op_code not in current:
+            try:
+                (blocks / f"{op_code}.py").unlink(missing_ok=True)
+            except OSError:
+                pass
+    return deploy_engine(marketplace() / studio_blocks.ENGINE_FOLDER)
 
 
-def sablon() -> Path:
-    """Hazır sahnenin veri klasöründeki kopyası (exe her açılışta dosyalarını başka bir geçici klasöre açar)."""
-    if not SABLON_KAYNAK.is_file():
-        raise StudioHatasi(f"Hazır İSG sahnesi bulunamadı: {SABLON_KAYNAK}")
-    KOSU_KLASORU.mkdir(parents=True, exist_ok=True)
-    hedef = KOSU_KLASORU / SABLON_KAYNAK.name
-    if not hedef.is_file() or _dosya_ozeti(hedef) != _dosya_ozeti(SABLON_KAYNAK):
-        shutil.copyfile(SABLON_KAYNAK, hedef)
-    return hedef
+def scene_template() -> Path:
+    """Copy of the ready-made scene in the data folder (the exe unpacks its files into a different temporary folder on every start)."""
+    if not SCENE_SOURCE.is_file():
+        raise StudioError(T("The ready-made İSG scene was not found: {path}", path=SCENE_SOURCE))
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    target = RUN_DIR / SCENE_SOURCE.name
+    if not target.is_file() or _file_digest(target) != _file_digest(SCENE_SOURCE):
+        shutil.copyfile(SCENE_SOURCE, target)
+    return target
 
 
-# ---------------------------------------------------------------- arayüzsüz koşular
+# ---------------------------------------------------------------- headless runs
 
 
-class Kosu:
-    """Bir kameranın gizli `studio run` süreci."""
+class Run:
+    """The hidden `studio run` process of one camera."""
 
-    def __init__(self, kod: str, kosu: str, surec: subprocess.Popen, dur: Path, gunluk: Path):
-        self.kod, self.kosu, self.surec, self.dur, self.gunluk = kod, kosu, surec, dur, gunluk
-        self.durum = "başlıyor"
-        self.sonuc: dict | None = None
-        self._okundu = threading.Event()
-        threading.Thread(target=self._oku, name=f"studio-{kod}", daemon=True).start()
+    def __init__(self, code: str, run_id: str, process: subprocess.Popen, stop_file: Path, log: Path):
+        self.code, self.run_id, self.process, self.stop_file, self.log = code, run_id, process, stop_file, log
+        self.state = "starting"
+        self.result: dict | None = None
+        self._read_done = threading.Event()
+        threading.Thread(target=self._read_events, name=f"studio-{code}", daemon=True).start()
 
-    def _oku(self) -> None:
-        """Studio'nun --json olaylarını okur (lifecycle / result)."""
+    def _read_events(self) -> None:
+        """Reads Studio's --json events (lifecycle / result)."""
         try:
-            for satir in self.surec.stdout:
+            for line in self.process.stdout:
                 try:
-                    olay = json.loads(satir)
+                    event = json.loads(line)
                 except ValueError:
                     # With no local license Studio's console prompt can precede
                     # the JSON result on the same line, even with stdin closed.
-                    bas = satir.find('{"type":')
-                    if bas < 0:
+                    start = line.find('{"type":')
+                    if start < 0:
                         continue
                     try:
-                        olay = json.loads(satir[bas:])
+                        event = json.loads(line[start:])
                     except ValueError:
                         continue
-                if not isinstance(olay, dict):
+                if not isinstance(event, dict):
                     continue
-                if olay.get("type") == "lifecycle":
-                    self.durum = olay.get("state") or self.durum
-                elif olay.get("type") == "result":
-                    self.sonuc = olay
+                if event.get("type") == "lifecycle":
+                    self.state = event.get("state") or self.state
+                elif event.get("type") == "result":
+                    self.result = event
         finally:
-            self._okundu.set()
+            self._read_done.set()
 
-    def calisiyor(self) -> bool:
-        return self.surec.poll() is None
+    def is_running(self) -> bool:
+        return self.process.poll() is None
 
-    def sorun(self) -> str | None:
-        """Süreç kendiliğinden bittiyse nedeni (lisans, eksik blok, çökme...), sürüyorsa None."""
-        if self.calisiyor():
+    def problem(self) -> str | None:
+        """If the process ended on its own, the reason (license, missing block, crash...); None while it runs."""
+        if self.is_running():
             return None
-        self._okundu.wait(2)
-        r = self.sonuc or {}
+        self._read_done.wait(2)
+        r = self.result or {}
         if r.get("success"):
             return None
-        neden = r.get("error") or r.get("failure_type") or f"çıkış kodu {self.surec.returncode}"
-        return (f"AugeLab Studio sahneyi çalıştıramadı ({neden}). Studio lisansınızı kurulum sihirbazından kontrol edin; "
-                f"ayrıntı: {self.gunluk}")
+        reason = r.get("error") or r.get("failure_type") or T("exit code {code}", code=self.process.returncode)
+        return T("AugeLab Studio could not run the scene ({reason}). Check your Studio license in the setup wizard; "
+                 "details: {log}", reason=reason, log=self.log)
 
-    def bitir(self, bekle_sn: float = 3.0) -> None:
-        """Önce akışı bitirir (açık olaylar kapanış kaydı bırakır), sonra süreci kapatır."""
+    def finish(self, wait_s: float = 3.0) -> None:
+        """First ends the stream (open events leave a closing record), then closes the process."""
         try:
-            self.dur.touch()
+            self.stop_file.touch()
         except OSError:
             pass
-        son = time.monotonic() + bekle_sn
-        while self.calisiyor() and time.monotonic() < son:
+        deadline = time.monotonic() + wait_s
+        while self.is_running() and time.monotonic() < deadline:
             time.sleep(0.2)
-        if self.calisiyor():
-            # Studio sürekli çalışma kipinde kendiliğinden bitmez: süreç ağacı (denetleyici ve işçi) kapatılır
-            subprocess.run(["taskkill", "/PID", str(self.surec.pid), "/T", "/F"], capture_output=True, creationflags=PENCERESIZ)
+        if self.is_running():
+            # in continuous mode Studio does not end on its own: the process tree (supervisor and worker) is closed
+            subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"], capture_output=True, creationflags=NO_WINDOW)
             try:
-                self.surec.wait(10)
+                self.process.wait(10)
             except subprocess.TimeoutExpired:
-                self.surec.kill()
+                self.process.kill()
         try:
-            self.dur.unlink(missing_ok=True)
+            self.stop_file.unlink(missing_ok=True)
         except OSError:
             pass
 
 
-KOSULAR: dict[str, Kosu] = {}
-_KILIT = threading.Lock()
+RUNS: dict[str, Run] = {}
+_LOCK = threading.Lock()
 
 
-def baslat(kod: str, kosu: str, adres: str = "", canli: bool = False, adim: int | None = None, ek_ortam: dict | None = None) -> Kosu:
-    """Kameranın sahnesini arayüzsüz başlatır. `canli`: süreç çökerse Studio onu yeniden başlatır."""
+def start(code: str, run_id: str, url: str = "", live: bool = False, step: int | None = None, extra_env: dict | None = None) -> Run:
+    """Starts the camera's scene headless. `live`: if the process crashes, Studio restarts it."""
     py = studio_python()
-    sahne = sablon()
-    bloklari_kur()
-    with _KILIT:
-        eski = KOSULAR.pop(kod, None)
-    if eski is not None:
-        eski.bitir(0)
-    KOSU_KLASORU.mkdir(parents=True, exist_ok=True)
-    dur = KOSU_KLASORU / f"{kod}.dur"
-    dur.unlink(missing_ok=True)
-    gunluk = KOSU_KLASORU / f"{kod}.log"
-    ortam = {k: v for k, v in os.environ.items() if not k.startswith(("ISG_", "PYTHON", "_MEI", "TCL_", "TK_"))}
-    ortam.update(ISG_KAMERA=f"{kod}#{kosu}", ISG_DUR=str(dur), PYTHONIOENCODING="utf-8")
-    if adres:
-        ortam["ISG_KAMERA_ADRES"] = adres  # şifre içerebilir: yalnızca sürecin ortamında, dosyaya yazılmaz
-    ortam.update(ek_ortam or {})
-    komut = [str(py), "-m", "studio", "run", str(sahne), "--json", "--verbosity", "30"]
-    if canli:
-        komut += ["--on-fail", "restart", "--max-restarts", "1000", "--restart-delay", "5"]
-    if adim:
-        komut += ["--step", str(int(adim))]
-    import studio_kurulum
+    scene = scene_template()
+    install_blocks()
+    with _LOCK:
+        old = RUNS.pop(code, None)
+    if old is not None:
+        old.finish(0)
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    stop_file = RUN_DIR / f"{code}.stop"
+    stop_file.unlink(missing_ok=True)
+    log = RUN_DIR / f"{code}.log"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ISG_", "PYTHON", "_MEI", "TCL_", "TK_"))}
+    env.update(ISG_CAMERA=f"{code}#{run_id}", ISG_STOP_FILE=str(stop_file), ISG_LANG=i18n.language(), PYTHONIOENCODING="utf-8")
+    if url:
+        env["ISG_CAMERA_URL"] = url  # may contain a password: only in the process environment, never written to a file
+    env.update(extra_env or {})
+    cmd = [str(py), "-m", "studio", "run", str(scene), "--json", "--verbosity", "30"]
+    if live:
+        cmd += ["--on-fail", "restart", "--max-restarts", "1000", "--restart-delay", "5"]
+    if step:
+        cmd += ["--step", str(int(step))]
+    import studio_setup
 
-    with gunluk.open("ab") as g, studio_kurulum._temiz_dll_dizini():  # Studio, paketlenmiş Python'un DLL dizinini devralmasın
-        surec = subprocess.Popen(komut, cwd=str(KOSU_KLASORU), env=ortam, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=g, text=True, encoding="utf-8", errors="replace", creationflags=PENCERESIZ)
-    k = Kosu(kod, kosu, surec, dur, gunluk)
-    with _KILIT:
-        KOSULAR[kod] = k
-    return k
-
-
-def durdur_hepsi() -> None:
-    """Program kapanırken: süren bütün koşuları bitirir."""
-    with _KILIT:
-        kosular = list(KOSULAR.values())
-        KOSULAR.clear()
-    for k in kosular:
-        k.bitir()
+    with log.open("ab") as stderr, studio_setup._clean_dll_dir():  # Studio must not inherit the packaged Python's DLL directory
+        process = subprocess.Popen(cmd, cwd=str(RUN_DIR), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=stderr, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    r = Run(code, run_id, process, stop_file, log)
+    with _LOCK:
+        RUNS[code] = r
+    return r
 
 
-# ---------------------------------------------------------------- durum ve deneme
+def stop_all() -> None:
+    """When the program closes: ends all running runs."""
+    with _LOCK:
+        runs = list(RUNS.values())
+        RUNS.clear()
+    for r in runs:
+        r.finish()
 
 
-KONTROL_SURUMU = 2  # lisans kontrolü modelleri de açar; eski sürümlerin "hazır" kaydı geçersiz sayılır
+# ---------------------------------------------------------------- status and test
 
 
-def _kayitli() -> dict:
+CHECK_VERSION = 3  # bumped when the check changes: a "ready" record from older versions does not count (3: English status keys)
+PROBE_CODE = "_probe"
+
+
+def _saved_status() -> dict:
     try:
-        return json.loads(DURUM_DOSYASI.read_text(encoding="utf-8"))
+        return json.loads(STATUS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
-def kaydet(**degerler) -> None:
-    d = _kayitli()
-    d.update(degerler)
-    DURUM_DOSYASI.parent.mkdir(parents=True, exist_ok=True)
-    DURUM_DOSYASI.write_text(json.dumps(d), encoding="utf-8")
+def save_status(**values) -> None:
+    d = _saved_status()
+    d.update(values)
+    STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATUS_FILE.write_text(json.dumps(d), encoding="utf-8")
 
 
-def _deneme_kosusu(sinir_sn: float, ek_ortam: dict | None = None) -> tuple["Kosu", str | None, dict]:
-    """Deneme sahnesini kısa bir koşuyla çalıştırır: motor modelleri açıp bir kare işler, sonucu bir dosyaya yazar.
-    Dönüş: (koşu, sorun ya da None, motorun sonucu)."""
-    KOSU_KLASORU.mkdir(parents=True, exist_ok=True)
-    sonuc_yolu = KOSU_KLASORU / "deneme-sonuc.json"
-    sonuc_yolu.unlink(missing_ok=True)
-    k = baslat("_deneme", secrets.token_hex(4), adim=3, ek_ortam={"ISG_DENEME_SONUC": str(sonuc_yolu), **(ek_ortam or {})})
+def _probe_run(timeout_s: float, extra_env: dict | None = None) -> tuple["Run", str | None, dict]:
+    """Runs the test scene briefly: the engine opens the models, processes one frame and writes the result to a file.
+    Returns (run, problem or None, the engine's result)."""
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    result_path = RUN_DIR / "probe-result.json"
+    result_path.unlink(missing_ok=True)
+    r = start(PROBE_CODE, secrets.token_hex(4), step=3, extra_env={"ISG_PROBE_RESULT": str(result_path), **(extra_env or {})})
     try:
-        k.surec.wait(sinir_sn)
+        r.process.wait(timeout_s)
     except subprocess.TimeoutExpired:
-        k.bitir(0)
-        raise StudioHatasi("AugeLab Studio deneme sahnesini zamanında bitirmedi.") from None
+        r.finish(0)
+        raise StudioError(T("AugeLab Studio did not finish the test scene in time.")) from None
     finally:
-        with _KILIT:
-            KOSULAR.pop("_deneme", None)
-    sorun, model = k.sorun(), {}
-    if not sorun:
+        with _LOCK:
+            RUNS.pop(PROBE_CODE, None)
+    problem, model = r.problem(), {}
+    if not problem:
         try:
-            model = json.loads(sonuc_yolu.read_text(encoding="utf-8"))
+            model = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            model = {"ok": False, "hata": "motor sonuç bırakmadı (İSG blokları Studio'da çalışmadı)"}
+            model = {"ok": False, "error": T("the engine left no result (the İSG blocks did not run in Studio)")}
         if not model.get("ok"):
-            hata = str(model.get("hata") or "bilinmiyor")
-            sorun = ("Lisans kodunu kurulum sihirbazından girin." if hata.startswith("lisans") else f"Modeller açılamadı ({hata}).")
-    return k, sorun, model
+            error = str(model.get("error") or model.get("hata") or T("unknown reason"))
+            # the engine marks license errors with "lisans: " (older engines) or "license: "
+            problem = (T("Enter the license code in the setup wizard.") if error.startswith(("lisans", "license"))
+                       else T("Could not open the models ({error}).", error=error))
+    return r, problem, model
 
 
-def yuzleri_gizle(adres: str, cikti: Path, sinir_sn: float = 240.0) -> int:
-    """Panelin `adres`ten (127.0.0.1, tek seferlik) verdiği karedeki yüzleri Studio'da gizleyip `cikti`ya yazar; şifreli
-    modeller panelde açılmaz. Dönüş: gizlenen bölge sayısı."""
-    cikti.unlink(missing_ok=True)
-    _, sorun, model = _deneme_kosusu(sinir_sn, {"ISG_YUZ_KARE": adres, "ISG_YUZ_CIKTI": str(cikti)})
-    if sorun:
-        raise StudioHatasi(sorun)
-    if not cikti.is_file():
-        raise StudioHatasi("Yüzler gizlenemedi.")
-    return int(model.get("yuz") or 0)
+def mask_faces(url: str, output: Path, timeout_s: float = 240.0) -> int:
+    """Masks the faces in Studio on the frame the panel serves at `url` (127.0.0.1, one-time) and writes it to `output`;
+    encrypted models are not opened in the panel. Returns the number of masked regions."""
+    output.unlink(missing_ok=True)
+    _, problem, model = _probe_run(timeout_s, {"ISG_FACE_FRAME_URL": url, "ISG_FACE_OUTPUT": str(output)})
+    if problem:
+        raise StudioError(problem)
+    if not output.is_file():
+        raise StudioError(T("Could not mask the faces."))
+    return int(model.get("faces") or model.get("yuz") or 0)
 
 
-def dene(sinir_sn: float = 240.0) -> dict:
-    """Studio'nun arayüzsüz çalışabildiğini (kurulu, bloklar yükleniyor) ve modellerin açıldığını (şifreli paketlerde
-    Studio lisansı dahil) kısa bir koşuyla dener: motor siyah bir kareyle modelleri çalıştırıp sonucu bir dosyaya yazar."""
-    k, sorun, _ = _deneme_kosusu(sinir_sn)
-    if sorun:
-        kaydet(hazir=False, denendi=time.time(), hata=sorun[:300], kontrol=KONTROL_SURUMU)
-        raise StudioHatasi(sorun)
-    kaydet(hazir=True, denendi=time.time(), surum=surum(), hata=None, kontrol=KONTROL_SURUMU)
-    return {"hazir": True, "sure_sn": round(((k.sonuc or {}).get("duration_ms") or 0) / 1000, 1)}
+def probe(timeout_s: float = 240.0) -> dict:
+    """Briefly tests that Studio can run headless (installed, blocks load) and that the models open (including the
+    Studio license for encrypted packages): the engine runs the models on a black frame and writes the result to a file."""
+    r, problem, _ = _probe_run(timeout_s)
+    if problem:
+        save_status(ready=False, tested_at=time.time(), error=problem[:300], check_version=CHECK_VERSION)
+        raise StudioError(problem)
+    save_status(ready=True, tested_at=time.time(), version=version(), error=None, check_version=CHECK_VERSION)
+    return {"ready": True, "duration_s": round(((r.result or {}).get("duration_ms") or 0) / 1000, 1)}
 
 
-async def durum() -> dict:
-    """Panelin gösterdiği Studio durumu. Studio'ya bağlanılmaz; kurulu mu, sahne denendi mi, koşan kamera var mı."""
-    if kurulu_klasor() is None:
-        raise StudioYok("AugeLab Studio kurulu değil.")
+async def status() -> dict:
+    """Studio status shown by the panel. Does not connect to Studio: is it installed, was the scene tested, is a camera running."""
+    if install_dir() is None:
+        raise StudioMissing(T("AugeLab Studio is not installed."))
     studio_python()
-    k = _kayitli()
-    hazir = k.get("hazir") if k.get("kontrol") == KONTROL_SURUMU else None  # eski kayıt: yeniden kontrol edilir
-    return {"surum": surum(), "arayuzsuz": True, "hazir": hazir, "denendi": k.get("denendi"), "hata": k.get("hata"),
-            "lisans_kaydedildi": bool(k.get("lisans") or LISANS_ISARETI.is_file()),
-            "motor_calisiyor": any(x.calisiyor() for x in list(KOSULAR.values()))}
+    s = _saved_status()
+    ready = s.get("ready") if s.get("check_version") == CHECK_VERSION else None  # old record: checked again
+    return {"version": version(), "headless": True, "ready": ready, "tested_at": s.get("tested_at"), "error": s.get("error"),
+            "license_saved": bool(s.get("license_saved_at") or LICENSE_MARKER.is_file() or _LEGACY_LICENSE_MARKER.is_file()),
+            "engine_running": any(r.is_running() for r in list(RUNS.values()))}
 
 
-# ---------------------------------------------------------------- panelin kullandığı işler (eski MCP köprüsüyle aynı adlar)
+# ---------------------------------------------------------------- operations used by the panel (same flow as the old MCP bridge)
 
 
-async def sahne_kur(kod: str, ayar: dict) -> dict:
-    """Kameranın koşusunu hazırlar: Studio ve hazır sahne yerinde mi, bloklar ve motor güncel mi."""
-    tur = (ayar.get("kamera") or {}).get("tur", "rtsp")
-    if tur == "usb":
-        raise StudioHatasi("USB kamera arayüzsüz çalışmada henüz desteklenmiyor. Kamerayı IP kamera ya da video dosyası olarak ekleyin.")
+async def prepare_scene(code: str, config: dict) -> dict:
+    """Prepares the camera's run: are Studio and the ready-made scene in place, are the blocks and engine up to date."""
+    kind = (config.get("source") or {}).get("type", "rtsp")
+    if kind == "usb":
+        raise StudioError(T("USB cameras are not supported in headless mode yet. Add the camera as an IP camera or a video file."))
     studio_python()
-    sablon()
-    bloklari_kur()
-    return {"kod": kod, "tur": tur, "adres": "", "kosu": None}
+    scene_template()
+    install_blocks()
+    return {"code": code, "type": kind, "url": "", "run": None}
 
 
-async def yeni_kosu(bilgi: dict, kod: str) -> str:
-    """Yeni bir koşu numarası verir: motorun kuyruğa bıraktığı kayıtlar bu numarayı taşır."""
-    bilgi["kosu"] = secrets.token_hex(4)
-    return bilgi["kosu"]
+async def new_run(info: dict, code: str) -> str:
+    """Gives a new run id: the records the engine leaves in the queue carry this id."""
+    info["run"] = secrets.token_hex(4)
+    return info["run"]
 
 
-async def kamera_adresi(bilgi: dict, adres: str) -> None:
-    """Canlı akış adresi koşunun ortamına verilir (dosyaya ya da sahneye yazılmaz)."""
-    bilgi["adres"] = adres
+async def set_camera_url(info: dict, url: str) -> None:
+    """The live stream address is passed in the run's environment (not written to a file or the scene)."""
+    info["url"] = url
 
 
-async def calistir(bilgi: dict, sure_ms: int | None = None) -> dict:
-    """Sahneyi arayüzsüz başlatır. `sure_ms` verilirse o kadar sonra akışı bitirir."""
-    canli = bilgi["tur"] in CANLI_TURLER
-    k = baslat(bilgi["kod"], bilgi["kosu"] or secrets.token_hex(4), bilgi.get("adres", ""), canli=canli)
-    bilgi["surec"] = k
-    if sure_ms:
-        def zamanla():
-            time.sleep(sure_ms / 1000)
-            if k.calisiyor():
-                k.dur.touch()
-        threading.Thread(target=zamanla, daemon=True, name=f"studio-sure-{bilgi['kod']}").start()
-    return {"pid": k.surec.pid}
+async def run(info: dict, duration_ms: int | None = None) -> dict:
+    """Starts the scene headless. If `duration_ms` is given, ends the stream after that long."""
+    live = info["type"] in LIVE_TYPES
+    r = start(info["code"], info["run"] or secrets.token_hex(4), info.get("url", ""), live=live)
+    info["process"] = r
+    if duration_ms:
+        def stop_later():
+            time.sleep(duration_ms / 1000)
+            if r.is_running():
+                r.stop_file.touch()
+        threading.Thread(target=stop_later, daemon=True, name=f"studio-timer-{info['code']}").start()
+    return {"pid": r.process.pid}
 
 
-async def durdur(bilgi: dict, dogrula_sn: float = 20.0) -> None:
-    """Akışı bitirir ve süreci kapatır; kapandığı doğrulanamazsa StudioHatasi."""
-    k = bilgi.get("surec") or KOSULAR.get(bilgi["kod"])
-    if k is None:
+async def stop(info: dict, verify_s: float = 20.0) -> None:
+    """Ends the stream and closes the process; StudioError if closing cannot be confirmed."""
+    r = info.get("process") or RUNS.get(info["code"])
+    if r is None:
         return
-    k.bitir()
-    with _KILIT:
-        if KOSULAR.get(bilgi["kod"]) is k:
-            KOSULAR.pop(bilgi["kod"])
-    if k.calisiyor():
-        raise StudioHatasi("Studio süreci kapatılamadı.")
+    r.finish()
+    with _LOCK:
+        if RUNS.get(info["code"]) is r:
+            RUNS.pop(info["code"])
+    if r.is_running():
+        raise StudioError(T("Could not close the Studio process."))
 
 
-def kosu_sorunu(bilgi: dict) -> str | None:
-    """Koşu kendiliğinden bittiyse (lisans, eksik dosya, çökme) nedeni."""
-    k = bilgi.get("surec")
-    return k.sorun() if k is not None else None
+def run_problem(info: dict) -> str | None:
+    """If the run ended on its own (license, missing file, crash), the reason."""
+    r = info.get("process")
+    return r.problem() if r is not None else None
 
 
-# ---------------------------------------------------------------- geliştirme komutları
+# ---------------------------------------------------------------- development commands
 
 
-def _komut(arg: list[str]) -> None:
-    yollar.hazirla()
-    if arg[0] == "durum":
-        print(asyncio.run(durum()))
-    elif arg[0] == "dene":
-        print(dene())
-    elif arg[0] == "calistir":
-        kod = arg[1]
-        ayar = json.loads((yollar.AYAR / f"{kod}.json").read_text(encoding="utf-8"))
-        bilgi = asyncio.run(sahne_kur(kod, ayar))
-        asyncio.run(yeni_kosu(bilgi, kod))
-        asyncio.run(calistir(bilgi))
-        time.sleep(float(arg[2]) if len(arg) > 2 else 30)
-        print("sorun:", kosu_sorunu(bilgi))
-        asyncio.run(durdur(bilgi))
-        print("durduruldu")
+def _cli(args: list[str]) -> None:
+    paths.prepare()
+    if args[0] == "status":
+        print(asyncio.run(status()))
+    elif args[0] == "probe":
+        print(probe())
+    elif args[0] == "run":
+        code = args[1]
+        config = json.loads((paths.CAMERAS / f"{code}.json").read_text(encoding="utf-8"))
+        info = asyncio.run(prepare_scene(code, config))
+        asyncio.run(new_run(info, code))
+        asyncio.run(run(info))
+        time.sleep(float(args[2]) if len(args) > 2 else 30)
+        print("problem:", run_problem(info))
+        asyncio.run(stop(info))
+        print("stopped")
 
 
 if __name__ == "__main__":
-    _komut(sys.argv[1:])
+    _cli(sys.argv[1:])

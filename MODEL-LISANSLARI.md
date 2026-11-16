@@ -1,9 +1,0 @@
-# Model lisans bildirimleri
-
-- Nesne ve iskelet modelleri, Ultralytics YOLO11s ve YOLO11n-pose ağırlıklarına dayanır. Ek model, Ultralytics YOLOE-11s-seg ağırlıklarına dayanır. [YOLO11](https://docs.ultralytics.com/models/yolo11/) · [YOLOE](https://docs.ultralytics.com/models/yoloe/) · [AGPL-3.0](https://ultralytics.com/license)
-- Öznitelik modeli, ImageNet ön eğitimli torchvision EfficientNet-B0 kullanır. [EfficientNet-B0](https://pytorch.org/vision/stable/models/efficientnet.html) · [BSD-3-Clause](https://github.com/pytorch/vision/blob/main/LICENSE)
-- Nesne modelinin eğitimi için CC BY 4.0 lisanslı Construction-PPE veri kümesi kullanıldı. [Construction-PPE](https://docs.ultralytics.com/datasets/detect/construction-ppe)
-- Öznitelik modelinde Roboflow Universe'teki CC BY 4.0 lisanslı kaynaklar kullanıldı. [drin/harness_check](https://universe.roboflow.com/drin/harness_check) · [fypcv/safety-harness-iess4](https://universe.roboflow.com/fypcv/safety-harness-iess4) · [magic-lee-sz50m/harness_detection](https://universe.roboflow.com/magic-lee-sz50m/harness_detection-1tckp-fjp9a) · [knowledgeflex/apron-detection](https://universe.roboflow.com/knowledgeflex/apron-detection) · [big-dataset-ppe/earmuffs](https://universe.roboflow.com/big-dataset-ppe/earmuffs-znwwu) · [2ppemonitoring/final_29feb](https://universe.roboflow.com/2ppemonitoring/final_29feb)
-- Öznitelik modeli için fotoğrafa göre lisanslanan Wikimedia Commons görüntüleri de kullanıldı. Görüntülerin kaynak adresi, lisansı ve hak sahibi eğitim hazırlığında kayda alındı. [Wikimedia Commons](https://commons.wikimedia.org/)
-
-Öznitelik modelinin eğitiminde ticari olmayan kullanım ve aynı lisansla paylaşım koşulu taşıyan üçüncü taraf verileri de kullanıldı. Bazı eğitim kaynaklarının atıfları ve modelin dağıtım koşulları doğrulanmayı bekliyor.

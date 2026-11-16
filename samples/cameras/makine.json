@@ -1,0 +1,91 @@
+{
+ "name": "Press shop",
+ "code": "makine",
+ "source": {
+  "type": "file",
+  "path": "videos/makine.mp4"
+ },
+ "ppe_everywhere": true,
+ "zones": [
+  {
+   "name": "Around the press",
+   "type": "restricted",
+   "poly": [
+    [
+     0.13,
+     0.36
+    ],
+    [
+     0.26,
+     0.25
+    ],
+    [
+     0.3,
+     0.1
+    ],
+    [
+     0.62,
+     0.1
+    ],
+    [
+     0.68,
+     0.52
+    ],
+    [
+     0.42,
+     0.9
+    ]
+   ]
+  },
+  {
+   "name": "Press operator area",
+   "type": "machine",
+   "poly": [
+    [
+     0.13,
+     0.36
+    ],
+    [
+     0.26,
+     0.25
+    ],
+    [
+     0.3,
+     0.1
+    ],
+    [
+     0.62,
+     0.1
+    ],
+    [
+     0.68,
+     0.52
+    ],
+    [
+     0.42,
+     0.9
+    ]
+   ]
+  }
+ ],
+ "rules": [
+  {
+   "id": "restricted_zone"
+  },
+  {
+   "id": "hard_hat"
+  },
+  {
+   "id": "vest"
+  },
+  {
+   "id": "reba"
+  },
+  {
+   "id": "unauthorized_in_machine_zone"
+  }
+ ],
+ "authorized_colors": [
+  "hi_vis_yellow"
+ ]
+}

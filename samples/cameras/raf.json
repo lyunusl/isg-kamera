@@ -1,0 +1,84 @@
+{
+ "name": "Rack area",
+ "code": "raf",
+ "source": {
+  "type": "file",
+  "path": "videos/raf.mp4"
+ },
+ "ppe_everywhere": true,
+ "zones": [
+  {
+   "name": "Rack face",
+   "type": "no_climb",
+   "poly": [
+    [
+     0.0,
+     0.1
+    ],
+    [
+     1.0,
+     0.1
+    ],
+    [
+     1.0,
+     0.52
+    ],
+    [
+     0.72,
+     0.6
+    ],
+    [
+     0.3,
+     0.58
+    ],
+    [
+     0.0,
+     0.55
+    ]
+   ]
+  },
+  {
+   "name": "Aisle in front of the rack",
+   "type": "aisle",
+   "poly": [
+    [
+     0.3,
+     0.56
+    ],
+    [
+     0.75,
+     0.56
+    ],
+    [
+     0.75,
+     0.68
+    ],
+    [
+     0.3,
+     0.68
+    ]
+   ]
+  }
+ ],
+ "rules": [
+  {
+   "id": "climbing"
+  },
+  {
+   "id": "running"
+  },
+  {
+   "id": "people_proximity"
+  },
+  {
+   "id": "hard_hat"
+  },
+  {
+   "id": "vest"
+  },
+  {
+   "id": "blocked_aisle",
+   "duration_s": 5
+  }
+ ]
+}

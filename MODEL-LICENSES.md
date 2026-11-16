@@ -1,0 +1,9 @@
+# Model license notices
+
+- The object and pose models are based on Ultralytics YOLO11s and YOLO11n-pose weights. The add-on model is based on Ultralytics YOLOE-11s-seg weights. [YOLO11](https://docs.ultralytics.com/models/yolo11/) · [YOLOE](https://docs.ultralytics.com/models/yoloe/) · [AGPL-3.0](https://ultralytics.com/license)
+- The attribute model uses torchvision EfficientNet-B0 pretrained on ImageNet. [EfficientNet-B0](https://pytorch.org/vision/stable/models/efficientnet.html) · [BSD-3-Clause](https://github.com/pytorch/vision/blob/main/LICENSE)
+- The object model was trained with the Construction-PPE dataset, licensed under CC BY 4.0. [Construction-PPE](https://docs.ultralytics.com/datasets/detect/construction-ppe)
+- The attribute model uses CC BY 4.0 licensed sources from Roboflow Universe. [drin/harness_check](https://universe.roboflow.com/drin/harness_check) · [fypcv/safety-harness-iess4](https://universe.roboflow.com/fypcv/safety-harness-iess4) · [magic-lee-sz50m/harness_detection](https://universe.roboflow.com/magic-lee-sz50m/harness_detection-1tckp-fjp9a) · [knowledgeflex/apron-detection](https://universe.roboflow.com/knowledgeflex/apron-detection) · [big-dataset-ppe/earmuffs](https://universe.roboflow.com/big-dataset-ppe/earmuffs-znwwu) · [2ppemonitoring/final_29feb](https://universe.roboflow.com/2ppemonitoring/final_29feb)
+- The attribute model also uses Wikimedia Commons images, licensed per photo. The source address, license and rights holder of each image were recorded while preparing the training data. [Wikimedia Commons](https://commons.wikimedia.org/)
+
+Training of the attribute model also used third-party data under non-commercial and share-alike conditions. Attributions for some training sources and the model's distribution terms are still to be verified.

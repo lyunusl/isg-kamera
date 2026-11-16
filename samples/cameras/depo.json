@@ -1,0 +1,56 @@
+{
+ "name": "Warehouse · Aisle",
+ "code": "depo",
+ "source": {
+  "type": "file",
+  "path": "videos/depo.mp4"
+ },
+ "ppe_everywhere": true,
+ "zones": [
+  {
+   "name": "Forklift aisle",
+   "type": "vehicle_lane",
+   "direction_deg": 90,
+   "poly": [
+    [
+     0.47,
+     0.25
+    ],
+    [
+     0.56,
+     0.25
+    ],
+    [
+     0.63,
+     0.55
+    ],
+    [
+     0.75,
+     1.0
+    ],
+    [
+     0.27,
+     1.0
+    ],
+    [
+     0.37,
+     0.6
+    ]
+   ]
+  }
+ ],
+ "rules": [
+  {
+   "id": "hard_hat"
+  },
+  {
+   "id": "vest"
+  },
+  {
+   "id": "vehicle_pedestrian"
+  },
+  {
+   "id": "wrong_way"
+  }
+ ]
+}
