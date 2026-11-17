@@ -134,11 +134,14 @@ REDIRECT_OUT = OutputRedirector(sys.stdout)
 REDIRECT_ERR = OutputRedirector(sys.stderr)
 ACTIVE_JOB: Job | None = None
 JOB_LOCK = threading.Lock()
+CLOSING = threading.Event()  # set (under JOB_LOCK) once the program starts closing: no new job is accepted after that
 
 
 def start_job(kind: str, title: str, fn, *args) -> tuple[bool, str]:
     global ACTIVE_JOB
     with JOB_LOCK:
+        if CLOSING.is_set():
+            return False, T("İSG Kamera is closing; no new job can be started.")
         if ACTIVE_JOB is not None and ACTIVE_JOB.status == "running":
             return False, T("\"{title}\" is running right now. Wait for it to finish or stop it.", title=ACTIVE_JOB.title)
         job = Job(kind, title)
@@ -149,7 +152,9 @@ def start_job(kind: str, title: str, fn, *args) -> tuple[bool, str]:
         try:
             result = fn(job, *args)
             job.result = result or {}
-            job.status = "error" if job.result.get("error") else ("stopped" if job.stop.is_set() else "done")
+            # "completed": the job finished its work before a late stop could take effect; it is not shown as stopped
+            stopped = job.stop.is_set() and not job.result.get("completed")
+            job.status = "error" if job.result.get("error") else ("stopped" if stopped else "done")
         except SystemExit as e:
             if e.code not in (None, 0):
                 if not isinstance(e.code, int):
@@ -459,9 +464,13 @@ def job_test(job: Job, code: str, password: str | None) -> dict:
     import camera
 
     config = read_camera(code)
-    if camera.test(config, camera_path(code), password) != 0:
+    r = camera.test(config, camera_path(code), password, stop=job.stop)
+    if r == 2:  # stopped while Studio was masking the faces: no snapshot was saved
+        return {}
+    if r != 0:
         return {"error": True}
-    return {"frame": f"/cameras/_frame_{camera.code(config, camera_path(code))}.jpg?t={int(time.time())}", "code": code}
+    return {"frame": f"/cameras/_frame_{camera.code(config, camera_path(code))}.jpg?t={int(time.time())}", "code": code,
+            "completed": True}  # the snapshot was saved: a stop that came too late does not turn the test into "stopped"
 
 
 def job_monitor(job: Job, code: str, password: str | None, minutes: float) -> dict:
@@ -1205,15 +1214,30 @@ class RequestHandler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "job": ACTIVE_JOB.summary() if ACTIVE_JOB else None})
 
 
-def shutdown(server) -> None:
-    time.sleep(0.4)
-    print(T("Closing İSG Kamera."), flush=True)
+def close_down(wait_s: float = 20.0) -> None:
+    """When the program closes: stops the running job and waits (for a limited time) until it ends, so it can stop its
+    scene, take in the last queue records and close open events; then closes any headless Studio process still left.
+    From the first moment on no new job is accepted (the server may still answer requests while the job is waited for)."""
+    with JOB_LOCK:
+        CLOSING.set()
+        job = ACTIVE_JOB
+    if job is not None and job.status == "running":
+        job.stop.set()
+        deadline = time.monotonic() + wait_s
+        while job.status == "running" and time.monotonic() < deadline:
+            time.sleep(0.3)
     try:
         import studio
 
         studio.stop_all()  # headless Studio processes must not stay behind
     except Exception:
         pass
+
+
+def shutdown(server) -> None:
+    time.sleep(0.4)
+    print(T("Closing İSG Kamera."), flush=True)
+    close_down()
     server.shutdown()
 
 
@@ -1351,13 +1375,7 @@ def main() -> None:
         pass
     finally:
         server.server_close()
-    # if monitoring is running, give it a moment so the recording closes cleanly
-    if ACTIVE_JOB is not None and ACTIVE_JOB.status == "running":
-        ACTIVE_JOB.stop.set()
-        for _ in range(10):
-            if ACTIVE_JOB.status != "running":
-                break
-            time.sleep(0.3)
+    close_down()  # a running job is stopped and waited for, headless Studio processes are closed
 
 
 if __name__ == "__main__":

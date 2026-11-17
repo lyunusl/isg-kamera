@@ -64,6 +64,17 @@ def sample_codes() -> list[str]:
     return sorted(p.stem for p in d.glob("*.json")) if d.exists() else []
 
 
+def hide(text) -> str:
+    """Shortens the user folder in a text shown in the panel or written to a log (the Windows user name does not appear)."""
+    text = str(text)
+    for env, short in (("LOCALAPPDATA", "%LOCALAPPDATA%"), ("APPDATA", "%APPDATA%"), ("USERPROFILE", "%USERPROFILE%")):
+        folder = os.environ.get(env)
+        if folder:
+            for form in {folder, folder.replace("\\", "/")}:
+                text = text.replace(form, short)
+    return text
+
+
 def ffmpeg() -> str:
     """The ffmpeg shipped with the program (imageio-ffmpeg package); else the one on PATH."""
     try:

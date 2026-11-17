@@ -91,6 +91,7 @@
  "AugeLab Studio is already installed.": "AugeLab Studio zaten kurulu.",
  "AugeLab Studio is installed. Next step: enter the license code from your AugeLab account.": "AugeLab Studio kuruldu. Sıradaki adım: AugeLab hesabınızdaki lisans kodunu girin.",
  "AugeLab Studio is installed. The license code that activates Studio is shown in your AugeLab account; the free Community plan is enough.": "AugeLab Studio kuruldu. Studio’yu etkinleştiren lisans kodu AugeLab hesabınızda görünür; ücretsiz Community planı yeterli.",
+ "AugeLab Studio is not activated on this computer: no license code was entered. Open the setup wizard and enter the license code from your AugeLab account.": "AugeLab Studio bu bilgisayarda etkinleştirilmemiş: lisans kodu girilmemiş. Kurulum sihirbazını açıp AugeLab hesabınızdaki lisans kodunu girin.",
  "AugeLab Studio is not installed": "AugeLab Studio kurulu değil",
  "AugeLab Studio is not installed.": "AugeLab Studio kurulu değil.",
  "AugeLab Studio is not installed. Install Studio first.": "AugeLab Studio kurulu değil. Önce Studio'yu kurun.",
@@ -884,6 +885,7 @@
  "invalid address": "adres geçersiz",
  "invalid value": "değer geçersiz",
  "last analysis {date}": "son analiz {date}",
+ "last line: {line}": "son satır: {line}",
  "license: {error}": "lisans: {error}",
  "linked to {n} event": "{n} olaya bağlı",
  "linked to {n} events": "{n} olaya bağlı",
@@ -1017,6 +1019,7 @@
  "İSG Kamera analyzes the images with <b>AugeLab Studio</b> on this computer; images are not sent to the internet. Studio runs in the background; its window does not open.": "İSG Kamera görüntüleri bu bilgisayardaki <b>AugeLab Studio</b> ile analiz eder; görüntüler internete gönderilmez. Studio arka planda çalışır, penceresi açılmaz.",
  "İSG Kamera has been closed. You can close this tab.": "İSG Kamera kapatıldı. Bu sekmeyi kapatabilirsiniz.",
  "İSG Kamera is already running: {url}": "İSG Kamera zaten çalışıyor: {url}",
+ "İSG Kamera is closing; no new job can be started.": "İSG Kamera kapanıyor; yeni işlem başlatılamaz.",
  "İSG Kamera looks for workplace safety hazards in the footage of your security cameras: a missing hard hat or vest, entry into a restricted zone, vehicle–pedestrian proximity and more. This short tour shows the screens and how a camera is added. No setting changes during the tour.": "İSG Kamera, güvenlik kameralarınızın görüntüsünde iş güvenliği tehlikelerini arar: takılmayan baret ve yelek, yasak bölgeye giriş, araç–yaya yakınlığı ve benzerleri. Bu kısa tur ekranları ve bir kameranın nasıl eklendiğini gösterir. Tur sırasında hiçbir ayar değişmez.",
  "İSG Kamera will download AugeLab Studio from AugeLab and install it on this computer; if the Visual C++ component is missing, it installs that from Microsoft too.": "İSG Kamera, AugeLab Studio’yu AugeLab’den indirip bu bilgisayara kuracak; Visual C++ bileşeni eksikse onu da Microsoft’tan kurar.",
  "İSG camera analysis: local server": "İSG kamera analizi: yerel sunucu"

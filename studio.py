@@ -25,12 +25,14 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import i18n
@@ -61,6 +63,10 @@ class StudioError(RuntimeError):
 
 class StudioMissing(StudioError):
     """AugeLab Studio is not installed: expected, not an error."""
+
+
+class Stopped(StudioError):
+    """The user stopped the job while Studio was working."""
 
 
 # ---------------------------------------------------------------- where Studio lives
@@ -244,15 +250,94 @@ def scene_template() -> Path:
 # ---------------------------------------------------------------- headless runs
 
 
-class Run:
-    """The hidden `studio run` process of one camera."""
+# Names a user name or password can follow in a log line ("password=...", "user: ..."), in English and Turkish
+# ("." stands for a letter that is written with or without a Turkish diacritic).
+_CREDENTIAL_KEYS = r"(?:user(?:name)?|usr|login|pass(?:word|wd)?|pwd|auth|kullan.c.(?:_?ad.)?|.ifre|parola)"
 
-    def __init__(self, code: str, run_id: str, process: subprocess.Popen, stop_file: Path, log: Path):
+
+def masker(url: str = "", local_urls: tuple = ()):
+    """Returns a function that hides the stream address, user name and password wherever they occur in Studio's output.
+    Every Studio line the panel writes or shows passes through it first: neither the log nor an error text keeps an
+    unmasked copy.
+
+    User name and password are masked at any length (percent-encoded and decoded forms). Values shorter than three
+    characters are looked for only as a separate word, in the user part of an address and in "key=value" / "key: value"
+    form, so the log is not chopped up; longer ones are replaced everywhere.
+
+    `local_urls`: one-time local addresses the run was given (the frame of a connection test): the address and its
+    access token are masked too."""
+    from urllib.parse import quote, unquote, urlsplit
+
+    long_values, short_values = set(), set()
+    for local in local_urls:
+        if local:
+            long_values.add(str(local))
+            try:
+                token = urlsplit(str(local)).path.strip("/")
+            except ValueError:
+                token = ""
+            if len(token) >= 8:
+                long_values.add(token)
+    if url:
+        long_values |= {url, unquote(url)}
+        try:
+            parts = urlsplit(url)
+            for value in (parts.username, parts.password):
+                if value:
+                    for form in {value, unquote(value), quote(unquote(value), safe="")}:
+                        (long_values if len(form) >= 3 else short_values).add(form)
+        except ValueError:
+            pass
+    ordered = sorted((v for v in long_values if v), key=len, reverse=True)
+    short_patterns = []
+    for value in sorted(short_values, key=len, reverse=True):
+        e = re.escape(value)
+        short_patterns.append(re.compile(rf"(?i)(\b{_CREDENTIAL_KEYS}\s*[=:]\s*['\"]?){e}(?![\w%])"))  # key=value
+        short_patterns.append(re.compile(rf"(?<![\w%]){e}(?![\w%])"))  # separate word
+
+    def mask(text) -> str:
+        text = str(text)
+        for value in ordered:
+            text = text.replace(value, "****")
+        text = re.sub(r"(://)[^/@\s]*@", r"\1****@", text)  # user part of an address (any length)
+        for pattern in short_patterns:
+            text = pattern.sub(lambda m: (m.group(1) if m.groups() else "") + "****", text)
+        return text
+    return mask
+
+
+_LOG_LOCK = threading.Lock()
+
+
+class Run:
+    """The hidden `studio run` process of one camera. Studio's stdout (--json events) and stderr are read in this
+    process; stderr lines are masked before they are appended to the log (no unmasked copy ever reaches the disk)."""
+
+    def __init__(self, code: str, run_id: str, process: subprocess.Popen, stop_file: Path, log: Path, mask=None):
         self.code, self.run_id, self.process, self.stop_file, self.log = code, run_id, process, stop_file, log
+        self.mask = mask or masker()
         self.state = "starting"
         self.result: dict | None = None
+        self.last_lines: deque[str] = deque(maxlen=20)  # last stderr lines of this run (masked)
         self._read_done = threading.Event()
+        self._stderr_done = threading.Event()
         threading.Thread(target=self._read_events, name=f"studio-{code}", daemon=True).start()
+        threading.Thread(target=self._read_stderr, name=f"studio-{code}-stderr", daemon=True).start()
+
+    def _read_stderr(self) -> None:
+        """Studio's stderr: every line is masked, then appended to the log."""
+        try:
+            for line in self.process.stderr:
+                clean = paths.hide(self.mask(line.rstrip("\r\n")))
+                if clean.strip():
+                    self.last_lines.append(clean.strip()[:200])
+                try:
+                    with _LOG_LOCK, self.log.open("a", encoding="utf-8") as f:
+                        f.write(clean + "\n")
+                except OSError:
+                    pass  # if the log cannot be written the line stays only in memory (masked)
+        finally:
+            self._stderr_done.set()
 
     def _read_events(self) -> None:
         """Reads Studio's --json events (lifecycle / result)."""
@@ -287,12 +372,26 @@ class Run:
         if self.is_running():
             return None
         self._read_done.wait(2)
+        self._stderr_done.wait(2)
         r = self.result or {}
         if r.get("success"):
             return None
-        reason = r.get("error") or r.get("failure_type") or T("exit code {code}", code=self.process.returncode)
+        reason = r.get("error") or r.get("failure_type")
+        if not reason:
+            code = self.process.returncode
+            if code is not None and code >= 2 ** 31:  # Windows reports exit codes unsigned: 4294967295 = -1
+                code -= 2 ** 32
+            reason = T("exit code {code}", code=code)
+            if self.last_lines:
+                reason += " · " + T("last line: {line}", line=self.last_lines[-1])
+        reason = paths.hide(self.mask(reason))
+        if "EOF when reading a line" in reason:
+            # An unlicensed Studio asks for the license code on the console when it starts headless; the panel gives it
+            # no input, so the run ends like this.
+            return T("AugeLab Studio is not activated on this computer: no license code was entered. Open the setup "
+                     "wizard and enter the license code from your AugeLab account.")
         return T("AugeLab Studio could not run the scene ({reason}). Check your Studio license in the setup wizard; "
-                 "details: {log}", reason=reason, log=self.log)
+                 "details: {log}", reason=reason, log=paths.hide(self.log))
 
     def finish(self, wait_s: float = 3.0) -> None:
         """First ends the stream (open events leave a closing record), then closes the process."""
@@ -321,7 +420,11 @@ _LOCK = threading.Lock()
 
 
 def start(code: str, run_id: str, url: str = "", live: bool = False, step: int | None = None, extra_env: dict | None = None) -> Run:
-    """Starts the camera's scene headless. `live`: if the process crashes, Studio restarts it."""
+    """Starts the camera's scene headless. `live`: if the process crashes, Studio restarts it.
+
+    `url` (may contain a password) goes only into the process environment: never onto the command line or into a file,
+    and it is masked if Studio's output mentions it. Every run has its own stop file, so a late stop meant for an
+    earlier run of the same camera cannot end this one."""
     py = studio_python()
     scene = scene_template()
     install_blocks()
@@ -330,13 +433,15 @@ def start(code: str, run_id: str, url: str = "", live: bool = False, step: int |
     if old is not None:
         old.finish(0)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    stop_file = RUN_DIR / f"{code}.stop"
+    stop_file = RUN_DIR / f"{code}-{run_id}.stop"
     stop_file.unlink(missing_ok=True)
     log = RUN_DIR / f"{code}.log"
     env = {k: v for k, v in os.environ.items() if not k.startswith(("ISG_", "PYTHON", "_MEI", "TCL_", "TK_"))}
     env.update(ISG_CAMERA=f"{code}#{run_id}", ISG_STOP_FILE=str(stop_file), ISG_LANG=i18n.language(), PYTHONIOENCODING="utf-8")
     if url:
         env["ISG_CAMERA_URL"] = url  # may contain a password: only in the process environment, never written to a file
+        # OpenCV / FFmpeg should not print the stream address (if they do, the panel masks it)
+        env.update(OPENCV_LOG_LEVEL="SILENT", OPENCV_FFMPEG_LOGLEVEL="-8")
     env.update(extra_env or {})
     cmd = [str(py), "-m", "studio", "run", str(scene), "--json", "--verbosity", "30"]
     if live:
@@ -345,12 +450,19 @@ def start(code: str, run_id: str, url: str = "", live: bool = False, step: int |
         cmd += ["--step", str(int(step))]
     import studio_setup
 
-    with log.open("ab") as stderr, studio_setup._clean_dll_dir():  # Studio must not inherit the packaged Python's DLL directory
-        process = subprocess.Popen(cmd, cwd=str(RUN_DIR), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=stderr, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
-    r = Run(code, run_id, process, stop_file, log)
-    with _LOCK:
+    with _LOCK:  # starting and registering in one locked section: stop_all() cannot miss a run that starts in between
+        with studio_setup._clean_dll_dir():  # Studio must not inherit the packaged Python's DLL directory
+            process = subprocess.Popen(cmd, cwd=str(RUN_DIR), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                       creationflags=NO_WINDOW)
+        paths.bind_child_process(process)  # if the program closes (even by closing its window), the Studio process closes too
+        # addresses handed over in the environment (the one-time frame address) must not reach the log either
+        local_urls = tuple(str(v) for k, v in (extra_env or {}).items() if k.endswith("_URL"))
+        r = Run(code, run_id, process, stop_file, log, masker(url, local_urls))
+        other = RUNS.get(code)  # a run of the same camera that started meanwhile
         RUNS[code] = r
+    if other is not None:
+        other.finish(0)
     return r
 
 
@@ -384,21 +496,29 @@ def save_status(**values) -> None:
     STATUS_FILE.write_text(json.dumps(d), encoding="utf-8")
 
 
-def _probe_run(timeout_s: float, extra_env: dict | None = None) -> tuple["Run", str | None, dict]:
+def _probe_run(timeout_s: float, extra_env: dict | None = None,
+               stop: threading.Event | None = None) -> tuple["Run", str | None, dict]:
     """Runs the test scene briefly: the engine opens the models, processes one frame and writes the result to a file.
-    Returns (run, problem or None, the engine's result)."""
+    Returns (run, problem or None, the engine's result). If `stop` is set while Studio works, the run is closed and
+    Stopped is raised."""
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     result_path = RUN_DIR / "probe-result.json"
     result_path.unlink(missing_ok=True)
     r = start(PROBE_CODE, secrets.token_hex(4), step=3, extra_env={"ISG_PROBE_RESULT": str(result_path), **(extra_env or {})})
+    deadline = time.monotonic() + timeout_s
     try:
-        r.process.wait(timeout_s)
-    except subprocess.TimeoutExpired:
-        r.finish(0)
-        raise StudioError(T("AugeLab Studio did not finish the test scene in time.")) from None
+        while r.is_running():
+            if stop is not None and stop.is_set():
+                r.finish(0)
+                raise Stopped(T("Stopped."))
+            if time.monotonic() > deadline:
+                r.finish(0)
+                raise StudioError(T("AugeLab Studio did not finish the test scene in time."))
+            time.sleep(0.1)
     finally:
         with _LOCK:
-            RUNS.pop(PROBE_CODE, None)
+            if RUNS.get(PROBE_CODE) is r:
+                RUNS.pop(PROBE_CODE)
     problem, model = r.problem(), {}
     if not problem:
         try:
@@ -413,11 +533,11 @@ def _probe_run(timeout_s: float, extra_env: dict | None = None) -> tuple["Run", 
     return r, problem, model
 
 
-def mask_faces(url: str, output: Path, timeout_s: float = 240.0) -> int:
+def mask_faces(url: str, output: Path, timeout_s: float = 240.0, stop: threading.Event | None = None) -> int:
     """Masks the faces in Studio on the frame the panel serves at `url` (127.0.0.1, one-time) and writes it to `output`;
-    encrypted models are not opened in the panel. Returns the number of masked regions."""
+    encrypted models are not opened in the panel. Returns the number of masked regions. `stop`: see _probe_run."""
     output.unlink(missing_ok=True)
-    _, problem, model = _probe_run(timeout_s, {"ISG_FACE_FRAME_URL": url, "ISG_FACE_OUTPUT": str(output)})
+    _, problem, model = _probe_run(timeout_s, {"ISG_FACE_FRAME_URL": url, "ISG_FACE_OUTPUT": str(output)}, stop)
     if problem:
         raise StudioError(problem)
     if not output.is_file():

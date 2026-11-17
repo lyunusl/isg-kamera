@@ -179,14 +179,14 @@ def open_capture(src):
     return cv2.VideoCapture(src, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000])
 
 
-def mask_faces(frame):
+def mask_faces(frame, stop: threading.Event | None = None):
     """Masks the faces in the zone-drawing snapshot (same model and same masking code as the engine in Studio).
-    Returns (frame, number of masked regions)."""
+    Returns (frame, number of masked regions). `stop`: if set while Studio works, the run is closed (studio.Stopped)."""
     import rules  # noqa: F401  (adds the engine folder to the path)
     from isg_core import community_model
 
     if community_model.is_community_folder(paths.ENGINE / "models"):  # an encrypted package opens only in Studio
-        return _mask_in_studio(frame)
+        return _mask_in_studio(frame, stop)
     from isg_core.detect import Detector
     from isg_core.recorder import face_regions, mask_faces as mask
 
@@ -195,55 +195,97 @@ def mask_faces(frame):
     return frame, len(face_regions(detections))
 
 
-def _mask_in_studio(frame):
+class OneTimeFrame:
+    """Hands one frame to Studio without writing it to disk: a small HTTP server on 127.0.0.1 only, at a random address,
+    that answers once. Every connection is handled in its own thread with a short timeout: a client that stalls or sends
+    nothing cannot hold up the server or its closing. close() waits for no client."""
+
+    TIMEOUT = 3.0  # seconds a client has to send its request and take the answer
+
+    def __init__(self, data: bytes, content_type: str = "image/png"):
+        import secrets
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.served = threading.Event()
+        self._lock = threading.Lock()
+        self._data = data
+        key = secrets.token_urlsafe(24)
+        outer = self
+
+        class Request(BaseHTTPRequestHandler):
+            timeout = self.TIMEOUT  # socket timeout: a half-sent request is dropped after this long
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                with outer._lock:
+                    wanted = self.path == "/" + key and not outer.served.is_set()
+                    if wanted:
+                        outer.served.set()
+                        body, outer._data = outer._data, b""
+                if not wanted:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        class Server(ThreadingHTTPServer):
+            daemon_threads = True
+            block_on_close = False  # server_close() does not wait for open connections
+
+        self._server = Server(("127.0.0.1", 0), Request)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}/{key}"
+        threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True, name="one-frame").start()
+
+    def close(self, max_s: float = 2.0) -> None:
+        """Closes the server; waits for no client and takes at most `max_s`."""
+        with self._lock:
+            self._data = b""
+            self.served.set()
+        closer = threading.Thread(target=self._server.shutdown, daemon=True, name="one-frame-close")
+        closer.start()
+        closer.join(max_s)
+        try:
+            self._server.server_close()
+        except OSError:
+            pass
+
+
+def _mask_in_studio(frame, stop: threading.Event | None = None):
     """A frame with unmasked faces is never written to disk: the Studio run fetches it from memory at a one-time local
     address served by this process."""
     import cv2
     import secrets
-    import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
 
     import studio
 
     ok, png = cv2.imencode(".png", frame)
     if not ok:
         raise OSError(T("could not encode the frame"))
-    data = {"png": png.tobytes()}
-    url_path = "/" + secrets.token_hex(16)
-
-    class Serve(BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-
-        def do_GET(self):
-            body = data.pop("png", None) if self.path == url_path else None  # only once
-            if body is None:
-                self.send_error(404)
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "image/png")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-    server = HTTPServer(("127.0.0.1", 0), Serve)
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
+    server = OneTimeFrame(png.tobytes())
     studio.RUN_DIR.mkdir(parents=True, exist_ok=True)
     output = studio.RUN_DIR / f"face-{secrets.token_hex(4)}.png"
     try:
-        count = studio.mask_faces(f"http://127.0.0.1:{server.server_address[1]}{url_path}", output)
+        # studio.mask_faces returns only after the Studio process has ended (or was closed): the server is closed after it
+        count = studio.mask_faces(server.url, output, stop=stop)
         masked = cv2.imread(str(output))
         if masked is None:
             raise OSError(T("could not read the masked frame"))
         return masked, count
     finally:
-        server.shutdown()
-        server.server_close()
-        data.clear()
+        server.close()
         output.unlink(missing_ok=True)
 
 
-def test(config: dict, config_path: Path, password: str | None = None) -> int:
+def test(config: dict, config_path: Path, password: str | None = None, stop: threading.Event | None = None) -> int:
+    """Connects, grabs one frame and saves it with the faces masked. Returns 0 if a snapshot was saved, 1 if not, 2 if
+    `stop` was set meanwhile (nothing is saved)."""
     import cv2
 
     src, shown = source(config, password)
@@ -271,9 +313,21 @@ def test(config: dict, config_path: Path, password: str | None = None) -> int:
             secs=time.time() - t0), flush=True)
     path = paths.CAMERAS / f"_frame_{code(config, config_path)}.jpg"
     path.parent.mkdir(parents=True, exist_ok=True)
-    masked, count = mask_faces(frame)
-    if not count:  # the model may have missed a person: the whole frame is blurred so no face stays visible
-        masked = cv2.GaussianBlur(masked, (0, 0), max(4.0, W / 160))
+    import studio
+
+    try:
+        if stop is not None and stop.is_set():
+            raise studio.Stopped(T("Stopped."))
+        masked, count = mask_faces(frame, stop)
+        if not count:  # the model may have missed a person: the whole frame is blurred so no face stays visible
+            masked = cv2.GaussianBlur(masked, (0, 0), max(4.0, W / 160))
+        # last look right before the snapshot is written: a stop up to here leaves the old snapshot as it is. A stop that
+        # arrives later finds the test finished: the caller reports it as done, not as stopped.
+        if stop is not None and stop.is_set():
+            raise studio.Stopped(T("Stopped."))
+    except studio.Stopped:  # the user stopped the test (Studio may have been masking the faces): nothing is saved
+        print(T("Stopped."), flush=True)
+        return 2
     cv2.imwrite(str(path), masked)  # for drawing zones; faces masked
     if count == 1:
         print(T("Snapshot saved: {n} face masked.", n=count), flush=True)
