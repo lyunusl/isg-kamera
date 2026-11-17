@@ -328,7 +328,9 @@ def test(config: dict, config_path: Path, password: str | None = None, stop: thr
     except studio.Stopped:  # the user stopped the test (Studio may have been masking the faces): nothing is saved
         print(T("Stopped."), flush=True)
         return 2
-    cv2.imwrite(str(path), masked)  # for drawing zones; faces masked
+    if not cv2.imwrite(str(path), masked):  # for drawing zones; faces masked
+        print(T("Could not save the snapshot (the data folder may be full or not writable)."), flush=True)
+        return 1  # the old snapshot (if any) is still there: the test must not be shown as successful
     if count == 1:
         print(T("Snapshot saved: {n} face masked.", n=count), flush=True)
     elif count:

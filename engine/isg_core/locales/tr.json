@@ -201,6 +201,7 @@
  "Could not record: {error}": "Kayıt alınamadı: {error}",
  "Could not run AugeLab Studio: {error}": "AugeLab Studio çalıştırılamadı: {error}",
  "Could not save the license code.": "Lisans kodu kaydedilemedi.",
+ "Could not save the snapshot (the data folder may be full or not writable).": "Kare kaydedilemedi (veri klasörü dolu ya da yazılamıyor olabilir).",
  "Could not save the license code. Get the code again from your AugeLab account and try again.": "Lisans kodu kaydedilemedi. Kodu AugeLab hesabınızdan yeniden alıp deneyin.",
  "Could not send: {message}": "Gönderilemedi: {message}",
  "Could not update an engine file ({file}): the file may be in use. Stop running analyses and try again.": "Motor dosyası güncellenemedi ({file}): dosya kullanımda olabilir. Süren analizleri durdurup tekrar deneyin.",
